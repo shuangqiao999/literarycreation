@@ -1,0 +1,68 @@
+[project]
+name = "literary-creation"
+version = "0.1.0"
+description = "LiteraryCreation — 小说续写与剧本复现的文学创作助手"
+readme = "README.md"
+license = { text = "AGPL-3.0-only" }
+requires-python = ">=3.11"
+authors = [{ name = "LiteraryCreation" }]
+keywords = ["literature", "novel", "screenplay", "creative-writing", "knowledge-graph", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "kuzu>=0.11.0",
+    "lancedb>=0.33.0",
+    "jieba>=0.42.1",
+    "httpx>=0.27.0",
+    "requests>=2.31.0",
+    "pyarrow>=14.0.0",
+    "pydantic>=2.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "sse-starlette>=2.0",
+    "python-dotenv>=1.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "numba>=0.59.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.9.0",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+literary-creation = "literarycreation.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/literarycreation"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"data" = "literarycreation/data"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501", "B008", "SIM108"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

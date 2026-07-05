@@ -1,0 +1,294 @@
+{
+  "literary": {
+    "name": "📖 文学叙事",
+    "domain": "literary",
+    "display_name": "文学叙事",
+    "metrics": [
+      "trust",
+      "tension",
+      "affection",
+      "power",
+      "mystery",
+      "fatigue"
+    ],
+    "initial_metrics": {
+      "trust": 50,
+      "tension": 20,
+      "affection": 40,
+      "power": 40,
+      "mystery": 30,
+      "fatigue": 10
+    },
+    "metric_ranges": {
+      "trust": [
+        0,
+        100
+      ],
+      "tension": [
+        0,
+        100
+      ],
+      "affection": [
+        0,
+        100
+      ],
+      "power": [
+        0,
+        100
+      ],
+      "mystery": [
+        0,
+        100
+      ],
+      "fatigue": [
+        0,
+        100
+      ]
+    },
+    "thresholds": {},
+    "actions": [
+      "confront",
+      "confess",
+      "ally",
+      "betray",
+      "investigate",
+      "protect",
+      "manipulate",
+      "observe"
+    ],
+    "self_effects": {
+      "confront": {
+        "trust": -20,
+        "tension": 25,
+        "affection": -15,
+        "fatigue": 10
+      },
+      "confess": {
+        "trust": 15,
+        "tension": -10,
+        "affection": 20,
+        "fatigue": 5
+      },
+      "ally": {
+        "trust": 15,
+        "tension": -15,
+        "power": 8,
+        "fatigue": -5
+      },
+      "betray": {
+        "trust": -40,
+        "tension": 30,
+        "affection": -30,
+        "power": 10,
+        "fatigue": 5
+      },
+      "investigate": {
+        "mystery": 10,
+        "tension": 5,
+        "fatigue": 8
+      },
+      "protect": {
+        "affection": 10,
+        "trust": 5,
+        "fatigue": -5
+      },
+      "manipulate": {
+        "power": 8,
+        "trust": -10,
+        "tension": 10,
+        "fatigue": 5
+      },
+      "observe": {
+        "fatigue": -3,
+        "mystery": 2
+      }
+    },
+    "target_effects": {
+      "confront": {
+        "trust": -15,
+        "tension": 15,
+        "affection": -10,
+        "fatigue": 5
+      },
+      "betray": {
+        "trust": -30,
+        "tension": 20,
+        "affection": -20,
+        "fatigue": 8
+      },
+      "confess": {
+        "trust": 12,
+        "affection": 18
+      },
+      "manipulate": {
+        "trust": -8,
+        "tension": 8,
+        "fatigue": 3
+      },
+      "ally": {
+        "trust": 10,
+        "affection": 5
+      },
+      "protect": {
+        "affection": 8,
+        "trust": 6
+      }
+    },
+    "conditional_effects": {
+      "confront_desperate": {
+        "condition": "trust < 20 and tension > 70",
+        "self_effects": {
+          "trust": -30,
+          "tension": 10,
+          "affection": -20
+        }
+      },
+      "confess_risky": {
+        "condition": "affection > 60 and trust > 40",
+        "self_effects": {
+          "affection": 25,
+          "trust": 10,
+          "tension": -20
+        }
+      },
+      "betray_ruthless": {
+        "condition": "power > 60 and affection < 30",
+        "self_effects": {
+          "power": 12,
+          "tension": 15
+        }
+      }
+    },
+    "delay_effects": {
+      "betray": {
+        "delay": 1,
+        "effects": {
+          "tension": 10,
+          "trust": -8
+        }
+      },
+      "confess": {
+        "delay": 1,
+        "effects": {
+          "affection": 8
+        }
+      }
+    },
+    "auto_effects": {
+      "tension_decay": {
+        "condition": "tension > 40",
+        "effects": {
+          "tension": -3,
+          "trust": 1
+        }
+      },
+      "trust_erosion": {
+        "condition": "trust < 30",
+        "effects": {
+          "trust": -2,
+          "tension": 3
+        }
+      },
+      "emotional_exhaustion": {
+        "condition": "fatigue > 60",
+        "effects": {
+          "affection": -3,
+          "trust": -2
+        }
+      },
+      "mystery_fade": {
+        "condition": "mystery > 70",
+        "effects": {
+          "mystery": -2
+        }
+      }
+    },
+    "modules": {
+      "pipeline": {
+        "order": [
+          "outline_control",
+          "finite_state_machine"
+        ],
+        "conditionals": {}
+      },
+      "outline_control": {
+        "deviation_threshold": 12.0,
+        "catch_up_window": 2
+      },
+      "finite_state_machine": {
+        "default_state": "neutral",
+        "command_states": [
+          "crisis"
+        ],
+        "transition_rules": [
+          {
+            "from": "neutral",
+            "to": "crisis",
+            "condition": {
+              "tension": [
+                ">",
+                70
+              ]
+            }
+          },
+          {
+            "from": "neutral",
+            "to": "intimate",
+            "condition": {
+              "affection": [
+                ">",
+                70
+              ],
+              "trust": [
+                ">",
+                50
+              ]
+            }
+          },
+          {
+            "from": "intimate",
+            "to": "betrayal",
+            "condition": {
+              "trust": [
+                "<",
+                30
+              ],
+              "affection": [
+                "<",
+                40
+              ]
+            }
+          },
+          {
+            "from": "crisis",
+            "to": "neutral",
+            "condition": {
+              "tension": [
+                "<",
+                40
+              ]
+            }
+          }
+        ],
+        "action_map": {
+          "neutral": {
+            "action_type": "observe",
+            "intensity": 0.3,
+            "target": ""
+          },
+          "crisis": null,
+          "intimate": {
+            "action_type": "confess",
+            "intensity": 0.7,
+            "target": ""
+          },
+          "betrayal": {
+            "action_type": "betray",
+            "intensity": 0.9,
+            "target": ""
+          }
+        }
+      }
+    }
+  }
+}
