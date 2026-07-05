@@ -281,6 +281,9 @@ class SimulationEngine:
             if dec:
                 dec["actor_id"] = agent.entity_id
                 dec["driver"] = "blueline"
+                dec.setdefault("action_type", "observe")
+                dec.setdefault("intensity", 0.3)
+                dec.setdefault("target", "")
             else:
                 dec = {"actor_id": agent.entity_id, "action_type": "observe", "intensity": 0.3,
                        "target": "", "rationale": "[蓝图模式] 默认观察", "driver": "blueline"}
@@ -352,6 +355,9 @@ class SimulationEngine:
             if dec:
                 dec["actor_id"] = agent.entity_id
                 dec["driver"] = "freeform"
+                dec.setdefault("action_type", "observe")
+                dec.setdefault("intensity", 0.3)
+                dec.setdefault("target", "")
             else:
                 dec = {"actor_id": agent.entity_id, "action_type": "observe", "intensity": 0.3,
                        "target": "", "rationale": "默认观察", "driver": "freeform"}
@@ -416,11 +422,11 @@ class SimulationEngine:
                 if delay_cfg and sub_intensity > 0:
                     dr = int(delay_cfg.get("delay", 1))
                     eff = {k: v * sub_intensity for k, v in delay_cfg.get("effects", {}).items()}
-                    self._states[dec["actor_id"]].schedule_delays(round_number, dr, eff)
+                    self._states[dec.get("actor_id", "")].schedule_delays(round_number, dr, eff)
 
         # Build SimulationRound actions
         for dec in decisions:
-            actor = dec["actor_id"]
+            actor = dec.get("actor_id", "")
             agent = next((a for a in self.agents if a.entity_id == actor), None)
             name = agent.name if agent else actor[:8]
             content = dec.get("rationale", dec.get("content", ""))[:200]
@@ -596,12 +602,12 @@ class SimulationEngine:
         from literarycreation.core.llm_client import Message
         lines = []
         for dec in decisions:
-            actor = dec["actor_id"]
+            actor = dec.get("actor_id", "")
             agent = next((a for a in self.agents if a.entity_id == actor), None)
             nm = agent.name if agent else actor[:8]
             d = deltas.get(actor, {})
             chg = ", ".join(f"{k}{v:+.1f}" for k, v in d.items()) or "无显著变化"
-            act_txt = f"采取 {dec['action_type']}(强度{dec.get('intensity', 0.5):.1f}) 目标:{dec.get('target') or '—'}"
+            act_txt = f"采取 {dec.get('action_type', 'observe')}(强度{dec.get('intensity', 0.5):.1f}) 目标:{dec.get('target') or '—'}"
             lines.append(f"{nm} {act_txt}，数值变化: {chg}")
         prompt = (
             f"将第 {round_number} 轮量化推演结果改写为一段生动简洁的叙事（100 字以内）。\n\n"
