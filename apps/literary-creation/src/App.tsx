@@ -126,7 +126,7 @@ export default function App() {
   const [causal, setCausal] = useState<CausalData | null>(null);
   const [tokenData, setTokenData] = useState<TokenStats | null>(null);
   const [timelineView, setTimelineView] = useState<"timeline" | "causal">("timeline");
-  const [mainTab, setMainTab] = useState<"graph" | "report" | "logs" | "timeline" | "optimize" | "token" | "dashboard">("graph");
+  const [mainTab, setMainTab] = useState<"graph" | "report" | "logs" | "timeline" | "token" | "dashboard">("graph");
   const [domain, setDomain] = useState("literary_realism");
   const [domains, setDomains] = useState<Array<{domain:string;name:string}>>([]);
 
@@ -141,19 +141,6 @@ export default function App() {
   type OutlineEvent = { round: number; event: string };
   const [characters, setCharacters] = useState<OutlineChar[]>([{ name: "", arc: "", initial: {}, final: {} }]);
   const [keyEvents, setKeyEvents] = useState<OutlineEvent[]>([{ round: 1, event: "" }]);
-
-  // ── 多结局探索 ──
-  const [optEnabled, setOptEnabled] = useState(false);
-  const [optIterations, setOptIterations] = useState(20);
-  const [optObjective, setOptObjective] = useState("balanced");
-  const [optMultiAction, setOptMultiAction] = useState(false);
-  const [optMaxActions, setOptMaxActions] = useState(3);
-  const [optWinCondition, setOptWinCondition] = useState("");
-  const [optScenarios, setOptScenarios] = useState<Array<{ name: string; directive: string; entity_ref: string }>>([{ name: "分支 1", directive: "", entity_ref: "" }]);
-  const [optRunning, setOptRunning] = useState(false);
-  const [optProgress, setOptProgress] = useState<{ done: number; total: number; current: string; best_win: number } | null>(null);
-  const [optReport, setOptReport] = useState<any>(null);
-  const optPollRef = useRef<number | null>(null);
   const [selectedCausalNode, setSelectedCausalNode] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -336,16 +323,6 @@ export default function App() {
     } catch { /* ignore */ }
   }, []);
 
-  // 运行前把多动作设置写入会话 config_json（普通推演与优化器统一读取）
-  const persistSettings = useCallback(async (sessionId: string) => {
-    try {
-      await fetch(`${API_BASE}/session/${sessionId}/settings`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enable_multi_action: optMultiAction, max_actions: optMaxActions }),
-      });
-    } catch { /* ignore */ }
-  }, [optMultiAction, optMaxActions]);
-
   const fetchLogs = useCallback(async (sessionId: string) => {
     try {
       const r = await fetch(`${API_BASE}/session/${sessionId}/logs`);
@@ -501,64 +478,6 @@ export default function App() {
       alert("删除失败: " + (err.message || "未知错误"));
     }
   }, [selectedId, fetchSessions]);
-
-  // ── 多结局探索函数 ──
-  const addScenario = useCallback(() => {
-    setOptScenarios(prev => [...prev, { name: `分支 ${prev.length + 1}`, directive: "", entity_ref: "" }]);
-  }, []);
-  const removeScenario = useCallback((idx: number) => {
-    setOptScenarios(prev => prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx));
-  }, []);
-  const updateScenario = useCallback((idx: number, field: "name" | "directive" | "entity_ref", val: string) => {
-    setOptScenarios(prev => prev.map((s, i) => i === idx ? { ...s, [field]: val } : s));
-  }, []);
-
-  const pollOptimize = useCallback((id: string) => {
-    if (optPollRef.current) window.clearInterval(optPollRef.current);
-    optPollRef.current = window.setInterval(async () => {
-      try {
-        const r = await fetch(`${API_BASE}/session/${id}/optimize/result`);
-        if (!r.ok) return;
-        const d = await r.json();
-        setOptProgress(d.progress || null);
-        if (d.report && Object.keys(d.report).length) setOptReport(d.report);
-        if (!d.running) {
-          if (optPollRef.current) { window.clearInterval(optPollRef.current); optPollRef.current = null; }
-          setOptRunning(false);
-          fetchSessions();
-          fetchLogs(id);
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-  }, [fetchSessions, fetchLogs]);
-
-  const startOptimize = useCallback(async () => {
-    if (!selectedId) return;
-    const scenarios = optScenarios.filter(s => s.directive.trim()).map(s => ({
-      name: s.name, directive: s.directive,
-      win_target: s.entity_ref.trim() ? { entity_ref: s.entity_ref.trim() } : undefined,
-    }));
-    if (scenarios.length === 0) { alert("请至少填写一个分支的走向指令"); return; }
-    if (!optWinCondition.trim() && !window.confirm("未填写创作目标，将尝试使用会话的创作愿景(pre-goal)。是否继续？")) return;
-    setOptRunning(true); setOptReport(null); setOptProgress(null); setMainTab("optimize"); setLogs([]);
-    try {
-      await persistSettings(selectedId);
-      const r = await fetch(`${API_BASE}/session/${selectedId}/optimize`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scenarios, win_condition: optWinCondition, iterations: optIterations, objective: optObjective }),
-      });
-      if (!r.ok) throw new Error(await r.text());
-      pollOptimize(selectedId);
-    } catch (e: any) {
-      setOptRunning(false);
-      alert("优化启动失败: " + (e.message || "未知错误"));
-    }
-  }, [selectedId, optScenarios, optWinCondition, optIterations, optObjective, persistSettings, pollOptimize]);
-
-  const cancelOptimize = useCallback(async () => {
-    if (!selectedId) return;
-    try { await fetch(`${API_BASE}/session/${selectedId}/optimize/cancel`, { method: "POST" }); } catch { /* ignore */ }
-  }, [selectedId]);
 
   const sendPreGoal = useCallback(async () => {
     if (!selectedId || !preGoal.trim()) return;
@@ -813,57 +732,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* ── 多结局探索面板（高级，默认关闭） ── */}
-        <div style={{ marginBottom: 10, background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: 10 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: "#e2e8f0" }}>
-            <Toggle checked={optEnabled} onChange={setOptEnabled} />
-            多结局探索
-            <span style={{ fontSize: 11, color: "#94a3b8", background: "#1e293b", borderRadius: 8, padding: "1px 6px" }}>Beta</span>
-            <span style={{ marginLeft: "auto", fontSize: 12, color: optEnabled ? "#34d399" : "#64748b" }}>{optEnabled ? "已启用" : "默认关闭"}</span>
-          </label>
-          {optEnabled && (
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-              <div>
-                <label style={lbl}>每个分支生成次数：{optIterations}</label>
-                <input type="range" min={2} max={100} step={1} value={optIterations} onChange={e => setOptIterations(parseInt(e.target.value))} style={{ width: "100%" }} />
-              </div>
-              <div>
-                <label style={lbl}>择优目标</label>
-                <select value={optObjective} onChange={e => setOptObjective(e.target.value)} style={{ ...inp, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6 }}>
-                  <option value="max_win_rate">📈 最贴合目标</option>
-                  <option value="min_cost">💰 最自然（最少突兀）</option>
-                  <option value="balanced">⚖️ 兼顾张力与自然</option>
-                </select>
-              </div>
-              <div>
-                <label style={lbl}>创作目标 / 结局约束（统一评判标准）</label>
-                <textarea value={optWinCondition} onChange={e => setOptWinCondition(e.target.value)} placeholder="例：主角历尽磨难终成长、反派伏诛（留空则用会话的创作愿景）" style={{ height: 50, fontSize: 13, width: "100%" }} />
-              </div>
-              <div>
-                <label style={lbl}>剧情分支（不同走向指令，逐一对比）</label>
-                {optScenarios.map((s, i) => (
-                  <div key={i} style={{ marginBottom: 6, background: "#1e293b", borderRadius: 6, padding: 6 }}>
-                    <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
-                      <input value={s.name} onChange={e => updateScenario(i, "name", e.target.value)} placeholder="分支名" style={{ flex: 1, height: 26, fontSize: 13 }} />
-                      <button onClick={() => removeScenario(i)} disabled={optScenarios.length <= 1} style={{ ...btn, height: 26, background: "transparent", color: optScenarios.length <= 1 ? "#475569" : "#f87171", border: "none", cursor: optScenarios.length <= 1 ? "not-allowed" : "pointer" }}>✕</button>
-                    </div>
-                    <textarea value={s.directive} onChange={e => updateScenario(i, "directive", e.target.value)} placeholder="该分支的剧情走向（如：让主角黑化复仇 / 走向大团圆）" style={{ height: 44, fontSize: 13, width: "100%" }} />
-                    <input list={`ents-${i}`} value={s.entity_ref} onChange={e => updateScenario(i, "entity_ref", e.target.value)} placeholder="关注角色（留空=全体；按该角色弧光达成度评判）" style={{ height: 26, fontSize: 13, width: "100%", marginTop: 4 }} />
-                    <datalist id={`ents-${i}`}>
-                      {(graphData?.nodes || []).map(n => <option key={n.id} value={n.name} />)}
-                    </datalist>
-                  </div>
-                ))}
-                <button onClick={addScenario} style={{ ...btn, width: "100%", background: "#1e293b", color: "#cbd5e1" }}>＋ 添加分支</button>
-              </div>
-              <div style={{ fontSize: 12, color: "#64748b" }}>
-                ⏱ 共 {optScenarios.length} 分支 × {optIterations} 次 = {optScenarios.length * optIterations} 次完整创作演绎
-                <span style={{ display: "block", fontSize: 11, color: "#475569" }}>本地 LM Studio 串行排队，单次约数分钟，建议先用小次数试跑</span>
-              </div>
-            </div>
-          )}
-        </div>
-
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>会话列表（历史推演记录）</div>
         {sessions.length === 0 && (
           <div style={{ color: "#94a3b8", fontSize: 13, textAlign: "center", padding: 20 }}>
@@ -919,29 +787,7 @@ export default function App() {
                 {selected.current_round > 0 && <span className="pill">{selected.current_round}/{selected.total_rounds} 轮</span>}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label title="启用资源分配（多动作）：每方每轮可同时把资源分配给多个动作（如进攻+防守），运行前生效" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#cbd5e1", cursor: "pointer" }}>
-                  <Toggle checked={optMultiAction} onChange={setOptMultiAction} />
-                  多动作
-                </label>
-                {optMultiAction && (
-                  <select value={optMaxActions} onChange={e => setOptMaxActions(parseInt(e.target.value))} title="每方最多动作数" style={{ height: 24, fontSize: 12, background: "#0f172a", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4 }}>
-                    <option value={2}>最多2</option>
-                    <option value={3}>最多3</option>
-                    <option value={4}>最多4</option>
-                  </select>
-                )}
-                {optEnabled ? (
-                  optRunning ? (
-                    <button className="btnSmall" style={{ marginRight: 6, background: "#ef4444", color: "#fff", border: "none" }} onClick={cancelOptimize}>
-                      取消优化
-                    </button>
-                  ) : (
-                    <button className="btnSmall btnSmallPrimary" style={{ marginRight: 6 }} onClick={startOptimize}
-                      disabled={selected ? RUNNING_SET.has(selected.status) : false}>
-                      生成多结局
-                    </button>
-                  )
-                ) : selected && RUNNING_SET.has(selected.status) ? (
+                {selected && RUNNING_SET.has(selected.status) ? (
                   <>
                     <span style={{ fontSize: 12, color: "#22c55e", background: "#052e16", borderRadius: 4, padding: "2px 8px", marginRight: 4 }}>
                       推演中
@@ -983,7 +829,7 @@ export default function App() {
 
             {/* 主区标签切换: 图谱 / 报告 / 日志 */}
             <div style={{ display: "flex", gap: 4, padding: "6px 12px 0" }}>
-              {(["graph", "report", "logs", "dashboard", "timeline", "optimize", "token"] as const).map(k => (
+              {(["graph", "report", "logs", "dashboard", "timeline", "token"] as const).map(k => (
                 <button
                   key={k}
                   onClick={() => setMainTab(k)}
@@ -1518,80 +1364,6 @@ export default function App() {
                       {l.message}
                     </div>
                   ))}
-                </div>
-              )}
-
-              {mainTab === "optimize" && (
-                <div style={{ padding: 16, color: "#cbd5e1", fontSize: 13 }}>
-                  {optRunning && optProgress && (
-                    <div style={{ marginBottom: 16 }}>
-                      <div style={{ marginBottom: 4 }}>
-                        进行中：{optProgress.current}（{optProgress.done}/{optProgress.total}，当前最高胜分 {optProgress.best_win.toFixed(2)}）
-                      </div>
-                      <div style={{ height: 8, background: "#0f172a", borderRadius: 4, overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: `${optProgress.total ? (optProgress.done / optProgress.total * 100) : 0}%`, background: "#3b82f6" }} />
-                      </div>
-                    </div>
-                  )}
-                  {!optReport && !optRunning && (
-                    <div style={{ color: "#64748b", textAlign: "center", paddingTop: 60 }}>
-                      在左侧启用“多结局探索”，配置创作目标与多个剧情分支后点“生成多结局”。
-                    </div>
-                  )}
-                  {optReport && (
-                    <>
-                      {optReport.cancelled && (
-                        <div style={{ color: "#f59e0b", marginBottom: 8 }}>
-                          ⚠ 优化已取消，以下为已完成部分（{optReport.completed_runs}/{optReport.total_runs}）
-                        </div>
-                      )}
-                      {optReport.recommended && (
-                        <div style={{ marginBottom: 16, background: "#0f172a", border: "1px solid #3b82f6", borderRadius: 8, padding: 12 }}>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: "#60a5fa", marginBottom: 4 }}>🏆 推荐分支：{optReport.recommended.name}</div>
-                          <div style={{ fontSize: 13 }}>
-                            契合度 {(optReport.recommended.win_mean * 100).toFixed(0)}%
-                            （95%CI {(optReport.recommended.win_ci95[0] * 100).toFixed(0)}–{(optReport.recommended.win_ci95[1] * 100).toFixed(0)}%）
-                            · 达成率 {(optReport.recommended.success_rate * 100).toFixed(0)}%
-                            · 突兀度 {optReport.recommended.cost_mean.toFixed(2)}
-                          </div>
-                        </div>
-                      )}
-                      {optReport.scenarios && optReport.scenarios.length > 0 && (
-                        <div style={{ marginBottom: 16 }}>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", marginBottom: 6 }}>契合度 / 突兀度 散点（最优分支高亮）</div>
-                          <svg width={360} height={300} style={{ background: "#0f172a", borderRadius: 8 }}>
-                            <line x1={40} y1={260} x2={340} y2={260} stroke="#334155" />
-                            <line x1={40} y1={20} x2={40} y2={260} stroke="#334155" />
-                            {optReport.scenarios.map((s: any, i: number) => {
-                              const cx = 40 + s.cost_mean * 300;
-                              const cy = 260 - s.win_mean * 240;
-                              return (
-                                <g key={i}>
-                                  <circle cx={cx} cy={cy} r={6} fill={s.is_pareto ? "#34d399" : "#64748b"} stroke="#0f172a" />
-                                  <text x={cx + 8} y={cy + 4} fill="#cbd5e1" fontSize={10}>{s.name}</text>
-                                </g>
-                              );
-                            })}
-                            <text x={190} y={285} textAnchor="middle" fill="#94a3b8" fontSize={12}>突兀度 →</text>
-                            <text x={14} y={140} textAnchor="middle" fill="#94a3b8" fontSize={12} transform="rotate(-90, 14, 140)">契合度 →</text>
-                          </svg>
-                        </div>
-                      )}
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", marginBottom: 6 }}>各分支统计</div>
-                      {optReport.scenarios && optReport.scenarios.map((s: any, i: number) => (
-                        <div key={i} style={{ marginBottom: 8, background: "#0f172a", borderRadius: 6, padding: 8, borderLeft: `3px solid ${s.is_pareto ? "#34d399" : "#475569"}` }}>
-                          <div style={{ fontWeight: 600 }}>{s.name} {s.is_pareto && <span style={{ fontSize: 11, color: "#34d399" }}>（最优）</span>}</div>
-                          <div style={{ fontSize: 13, color: "#94a3b8" }}>
-                            契合度 {(s.win_mean * 100).toFixed(0)}% ± {((s.win_ci95 ? (s.win_ci95[1] - s.win_mean) : 0) * 100).toFixed(0)}%
-                            · 达成率 {(s.success_rate * 100).toFixed(0)}%
-                            · 突兀度 {s.cost_mean.toFixed(2)}
-                            · {s.runs} 次
-                          </div>
-                          {s.directive && <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>走向：{s.directive}</div>}
-                        </div>
-                      ))}
-                    </>
-                  )}
                 </div>
               )}
 

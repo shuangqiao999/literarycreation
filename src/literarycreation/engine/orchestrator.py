@@ -256,7 +256,7 @@ class DeductionOrchestrator:
                           phase=DeductionPhase.GRAPH.value)
 
     async def _phase1_5_quantify(self) -> None:
-        """阶段1.5（仅量化模式）：确定规则包。叙事模式或识别失败则保持 _rule_engine=None。"""
+        """阶段1.5：加载文学风格规则包（domain 来自前端配置）。"""
         _current_phase.set("quantify")
         self._check_cancel()
 
@@ -265,48 +265,23 @@ class DeductionOrchestrator:
         if isinstance(cfg, str):
             cfg = _json.loads(cfg)
         self._enable_narrate = bool(cfg.get("enable_narrate", True))
-        self._enable_multi_action = bool(cfg.get("enable_multi_action", False))
-        try:
-            self._max_actions = int(cfg.get("max_actions", 3))
-        except (TypeError, ValueError):
-            self._max_actions = 3
         self._weather = str(cfg.get("weather", "") or "").strip()
         self._terrain = str(cfg.get("terrain", "") or "").strip()
-        self._style = str(cfg.get("style", "") or "现实主义").strip()
         self._outline = cfg.get("outline") if isinstance(cfg.get("outline"), dict) else None
         try:
             self._target_words = int(cfg.get("target_words", 0) or 0)
         except (TypeError, ValueError):
             self._target_words = 0
-        domain = (cfg.get("domain") or "narrative").strip()
-        custom = cfg.get("custom_rules")
-        if domain in ("", "narrative"):
-            self._rule_engine = None
-            return
 
+        domain = (cfg.get("domain") or "literary_realism").strip()
         from .rule_engine import RuleEngine
         try:
-            if domain == "custom" and custom:
-                self._rule_engine = RuleEngine.from_custom(custom)
-                self._log("quantify", f"阶段1.5: 使用自定义规则包（{self._rule_engine.domain}）")
-            elif domain == "auto":
-                self._log("quantify", "阶段1.5: 自动识别推演领域...")
-                from literarycreation.core.llm_client import DeductionLLMClient
-                detected = await RuleEngine.detect_domain(
-                    self.session.source_material, DeductionLLMClient())
-                if detected == "narrative":
-                    self._rule_engine = None
-                    self._log("quantify", "未识别到明确量化领域，回退叙事模式")
-                    return
-                self._rule_engine = RuleEngine.from_domain(detected)
-                self._log("quantify", f"识别领域: {self._rule_engine.pack.get('display_name', detected)}")
-            else:
-                self._rule_engine = RuleEngine.from_domain(domain)
-                self._log("quantify", f"阶段1.5: 使用领域规则包: {self._rule_engine.pack.get('display_name', domain)}")
+            self._rule_engine = RuleEngine.from_domain(domain)
+            self._log("quantify", f"阶段1.5: 使用领域规则包: {self._rule_engine.pack.get('display_name', domain)}")
         except Exception as e:
-            logger.warning("[Orchestrator] 规则包加载失败，回退叙事: %s", e)
+            logger.warning("[Orchestrator] 规则包加载失败: %s", e)
             self._rule_engine = None
-            self._log("quantify", f"规则包加载失败，回退叙事模式: {e}")
+            self._log("quantify", f"规则包加载失败: {e}")
 
     async def _phase2_graph(self) -> None:
         _current_phase.set("graph")
@@ -443,11 +418,8 @@ class DeductionOrchestrator:
             rule_engine=re_engine,
             states=states if re_engine is not None else None,
             enable_narrate=self._enable_narrate,
-            enable_multi_action=self._enable_multi_action,
-            max_actions=self._max_actions,
             env={"weather": self._weather, "terrain": self._terrain} if (self._weather or self._terrain) else None,
             cancel_event=self._cancel,
-            max_concurrent=getattr(self, "_max_concurrent", None),
             outline=outline,
             fsm_override_store=self._fsm_override_store,
             mode=mode,

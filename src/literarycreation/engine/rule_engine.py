@@ -351,31 +351,3 @@ class RuleEngine:
 
         return {"success": bool(success), "win_score": round(win_score, 4),
                 "cost": cost, "alive": alive}
-
-    # ── 领域识别（LLM） ──
-    @staticmethod
-    async def detect_domain(text: str, chat_client: Any, confidence_floor: float = 0.6) -> str:
-        from ._utils import extract_text
-        from .graph_builder import try_extract_json
-        from literarycreation.core.llm_client import Message
-
-        options = "\n".join(f"- {d['domain']}: {d['display_name']}" for d in list_domains())
-        _detect_base = (
-            "判断以下文本最适合哪个推演领域，并给出 0-1 的置信度。\n\n"
-            f"## 可选领域\n{options}\n- narrative: 无明确量化领域 / 纯叙事文学\n\n"
-            "## 文本\n{text}\n\n"
-            '## 输出 JSON（仅 JSON）\n{"domain": "领域标识", "confidence": 0.0到1.0}'
-        )
-        prompt = _detect_base.format(text=text[:4000])
-        try:
-            resp = await chat_client.chat([Message(role="user", content=prompt)],
-                                          system="你是领域分类器，只输出 JSON。", temperature=0.1)
-            data = try_extract_json(extract_text(resp))
-            if isinstance(data, dict):
-                dom = str(data.get("domain", "narrative"))
-                conf = float(data.get("confidence", 0.0))
-                if get_template(dom) is not None and conf >= confidence_floor:
-                    return dom
-        except Exception as e:
-            logger.warning("[RuleEngine] detect_domain 失败，回退叙事: %s", e)
-        return "narrative"

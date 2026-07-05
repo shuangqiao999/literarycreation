@@ -261,143 +261,9 @@ async def resume_deduction(session_id: str, request: Request):
 
 # ── 策略优化器 (蒙特卡洛多方案对比) ──
 
-class OptimizeRequest(BaseModel):
-    scenarios: list[dict] = Field(default_factory=list)
-    win_condition: str = ""
-    iterations: int = 20
-    objective: str = "balanced"
-    max_concurrent: int | None = None
-
-
 class SettingsRequest(BaseModel):
-    enable_multi_action: bool = False
-    max_actions: int = 3
     weather: str = ""
     terrain: str = ""
-
-
-def _opt_state(app):
-    if not hasattr(app.state, "optimize_tasks"):
-        app.state.optimize_tasks = {}
-    if not hasattr(app.state, "optimize_cancel"):
-        app.state.optimize_cancel = {}
-    if not hasattr(app.state, "optimize_progress"):
-        app.state.optimize_progress = {}
-    return app.state.optimize_tasks, app.state.optimize_cancel, app.state.optimize_progress
-
-
-@router.post("/session/{session_id}/optimize")
-async def run_optimization(session_id: str, body: OptimizeRequest, request: Request):
-    engine = _get_engine(request)
-    session = engine.get_session(session_id)
-    if session is None:
-        raise HTTPException(404, "Session not found")
-
-    tasks, cancels, progress = _opt_state(request.app)
-    existing = tasks.get(session_id)
-    if existing is not None and not existing.done():
-        raise HTTPException(409, "该会话的优化任务正在运行中")
-    if session.status.value in ("simulating", "reporting", "optimizing"):
-        raise HTTPException(409, "推演/优化进行中，请等待完成")
-
-    # 方案校验（至少 1 个；允许无指令的默认基线策略）
-    scenarios: list[dict] = []
-    for idx, s in enumerate(body.scenarios or []):
-        directive = str(s.get("directive", "")).strip()
-        name = str(s.get("name", "")).strip() or f"方案 {idx + 1}"
-        scenarios.append({"name": name, "directive": directive,
-                          "win_target": s.get("win_target")})
-    if not scenarios:
-        scenarios = [{"name": "默认策略", "directive": ""}]
-
-    # 胜利条件回退：请求 > 会话 pre_goals > 报错
-    win_condition = (body.win_condition or "").strip()
-    if not win_condition:
-        data = engine.session_store.get(session_id)
-        cfg = (data or {}).get("config_json", {}) or {}
-        if isinstance(cfg, str):
-            cfg = json.loads(cfg)
-        pre_goals = cfg.get("pre_goals", [])
-        if pre_goals:
-            win_condition = "；".join(str(g) for g in pre_goals)
-        else:
-            raise HTTPException(
-                400,
-                "未指定胜利条件(win_condition)。请在优化器面板填写胜利条件，"
-                "或先为该会话设定推演前目标(pre-goal)。",
-            )
-
-    iterations = max(1, min(int(body.iterations or 20), 200))
-
-    # 多动作设置以会话 config_json 为单一真值源（由 /settings 写入），优化器与主推演统一读取
-
-    from literarycreation.engine.optimizer import StrategyOptimizer
-    optimizer = StrategyOptimizer(engine)
-    cancel_event = asyncio.Event()
-    cancels[session_id] = cancel_event
-    progress[session_id] = {"done": 0, "total": len(scenarios) * iterations,
-                            "current": "", "best_win": 0.0}
-
-    def progress_cb(done, total, current, outcome):
-        prev = progress.get(session_id, {})
-        progress[session_id] = {
-            "done": done, "total": total, "current": current,
-            "best_win": max(prev.get("best_win", 0.0), outcome.win_score),
-        }
-
-    async def _task():
-        engine.session_store.update(session_id, status="optimizing")
-        try:
-            report = await optimizer.run_monte_carlo(
-                session_id=session_id, scenarios=scenarios, win_condition=win_condition,
-                iterations=iterations, objective=body.objective,
-                max_concurrent=body.max_concurrent, cancel_event=cancel_event,
-                progress_cb=progress_cb,
-            )
-            engine.session_store.update(
-                session_id,
-                optimization_report_json=json.dumps(report, ensure_ascii=False),
-                status="complete",
-            )
-        except Exception as e:
-            logger.exception("[LiteraryCreation] optimize failed")
-            engine.session_store.update(session_id, status="failed", error=str(e)[:500])
-            engine.log(session_id, "optimize", f"优化失败：{e}")
-        finally:
-            cancels.pop(session_id, None)
-
-    tasks[session_id] = asyncio.create_task(_task())
-    return {"status": "started", "total_runs": len(scenarios) * iterations}
-
-
-@router.post("/session/{session_id}/optimize/cancel")
-async def cancel_optimization(session_id: str, request: Request):
-    _, cancels, _ = _opt_state(request.app)
-    ev = cancels.get(session_id)
-    if ev is not None:
-        ev.set()
-        return {"cancelled": True}
-    return {"cancelled": False}
-
-
-@router.get("/session/{session_id}/optimize/result")
-async def optimization_result(session_id: str, request: Request):
-    engine = _get_engine(request)
-    tasks, _, progress = _opt_state(request.app)
-    task = tasks.get(session_id)
-    running = task is not None and not task.done()
-    data = engine.session_store.get(session_id)
-    if data is None:
-        raise HTTPException(404, "Session not found")
-    report = data.get("optimization_report_json", {}) or {}
-    if isinstance(report, str):
-        report = json.loads(report or "{}")
-    return {
-        "running": running,
-        "status": data.get("status", ""),
-        "progress": progress.get(session_id, {}),
-        "report": report,
-    }
 
 
 @router.post("/session/{session_id}/intervene")
@@ -467,7 +333,7 @@ async def set_pre_goal(session_id: str, req: PreGoalRequest, request: Request):
 
 @router.post("/session/{session_id}/settings")
 async def update_settings(session_id: str, req: SettingsRequest, request: Request):
-    """更新推演级设置（多动作资源分配），供普通推演与优化器统一读取。"""
+    """更新会话设置（天气/地形）。"""
     engine = _get_engine(request)
     session = engine.get_session(session_id)
     if session is None:
@@ -476,13 +342,10 @@ async def update_settings(session_id: str, req: SettingsRequest, request: Reques
     config = (data or {}).get("config_json", {}) or {}
     if isinstance(config, str):
         config = json.loads(config)
-    config["enable_multi_action"] = bool(req.enable_multi_action)
-    config["max_actions"] = max(1, int(req.max_actions or 3))
     config["weather"] = (req.weather or "").strip()
     config["terrain"] = (req.terrain or "").strip()
     engine.session_store.update(session_id, config_json=json.dumps(config, ensure_ascii=False))
-    return {"session_id": session_id, "enable_multi_action": config["enable_multi_action"],
-            "max_actions": config["max_actions"], "weather": config["weather"], "terrain": config["terrain"]}
+    return {"session_id": session_id, "weather": config["weather"], "terrain": config["terrain"]}
 
 
 @router.get("/domains")

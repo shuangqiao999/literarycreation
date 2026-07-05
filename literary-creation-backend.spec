@@ -27,16 +27,7 @@ hiddenimports += [
     'uvicorn.protocols.websockets.auto',
     'uvicorn.lifespan',
     'uvicorn.lifespan.on',
-    'numba',
-    'numba.core',
-    'numba.core.types',
-    'numba.core.typing',
-    'numba.targets',
-    'llvmlite',
-    'llvmlite.binding',
 ]
-hiddenimports += collect_submodules('numba')
-hiddenimports += collect_submodules('llvmlite')
 
 a = Analysis(
     ['src/literarycreation/main.py'],
