@@ -486,6 +486,37 @@ class DeductionOrchestrator:
 
     async def _phase5_report(self) -> None:
         _current_phase.set("report")
+
+        is_literary = (
+            self._rule_engine is not None
+            and self._rule_engine.domain.startswith("literary")
+            and self._states
+        )
+
+        # ── 文学模式：散文渲染为主输出，跳过推演分析报告 ──
+        if is_literary:
+            self._log("report", "阶段5: 文学正文生成开始")
+            report_payload: dict[str, Any] = {
+                "is_literary": True,
+                "domain": self._rule_engine.domain,
+                "final_states": {
+                    eid: {"name": st.name, "metrics": st.metrics,
+                          "history": st.history[-60:],
+                          "alive": self._rule_engine.is_alive(st)}
+                    for eid, st in self._states.items()
+                },
+            }
+            try:
+                await self._render_prose(report_payload)
+                self._log("report", f"文学正文生成完成: {len(report_payload.get('prose', ''))} 字")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[Orchestrator] 散文渲染失败: %s", e)
+                self._log("report", f"散文渲染失败: {e}")
+            self.store.update(self.session.id,
+                              report_json=_json.dumps(report_payload, ensure_ascii=False))
+            return
+
+        # ── 非文学模式：原有推演分析报告 ──
         self._log("report", "阶段5: 报告生成开始")
 
         from .reporter import generate_report
@@ -519,14 +550,6 @@ class DeductionOrchestrator:
                       "alive": self._rule_engine.is_alive(st)}
                 for eid, st in self._states.items()
             }
-
-        # ── 文学模式：生成散文/剧本正文 + 提纲对齐 ──
-        if self._rule_engine is not None and self._rule_engine.domain == "literary" and self._states:
-            try:
-                await self._render_prose(report_payload)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[Orchestrator] 散文渲染失败: %s", e)
-                self._log("report", f"散文渲染失败: {e}")
 
         self.store.update(self.session.id,
                           report_json=_json.dumps(report_payload, ensure_ascii=False))
