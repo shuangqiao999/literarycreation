@@ -71,7 +71,7 @@ async def test_mode_a_freeform():
         log_fn=lambda p, m: print(f"  [{p}] {m}"),
         rule_engine=re, states=states,
         enable_narrate=False, persist_events=False,
-        enable_multi_action=False, mode="freeform",
+        mode="freeform",
     )
 
     t0 = time.time()
@@ -131,7 +131,7 @@ async def test_mode_b_blueline():
         log_fn=lambda p, m: print(f"  [{p}] {m}"),
         rule_engine=re, states=states,
         enable_narrate=False, persist_events=False,
-        enable_multi_action=False, mode="blueline",
+        mode="blueline",
         event_scheduler=scheduler,
     )
 

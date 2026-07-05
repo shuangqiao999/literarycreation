@@ -426,7 +426,6 @@ export default function App() {
     setLoading(true);
     setLogs([]);
     try {
-      await persistSettings(selectedId);
       const r = await fetch(`${API_BASE}/session/${selectedId}/start`, { method: "POST" });
       if (!r.ok) throw new Error(await r.text());
       await fetchSessions();
@@ -434,7 +433,7 @@ export default function App() {
       alert("推演启动失败: " + (e.message || "未知错误"));
     }
     setLoading(false);
-  }, [selectedId, fetchSessions, persistSettings]);
+  }, [selectedId, fetchSessions]);
 
   const handleCancel = useCallback(async () => {
     if (!selectedId) return;
@@ -454,7 +453,6 @@ export default function App() {
     setLoading(true);
     setLogs([]);
     try {
-      await persistSettings(selectedId);
       const r = await fetch(`${API_BASE}/session/${selectedId}/resume`, { method: "POST" });
       if (!r.ok) throw new Error(await r.text());
       setLoading(false);
@@ -464,7 +462,7 @@ export default function App() {
       alert("继续推演失败: " + (e.message || "未知错误"));
     }
     setLoading(false);
-  }, [selectedId, fetchSessions, persistSettings]);
+  }, [selectedId, fetchSessions]);
 
   const handleDelete = useCallback(async (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();

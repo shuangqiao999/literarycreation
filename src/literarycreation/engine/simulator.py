@@ -52,10 +52,10 @@ class SimulationEngine:
         event_scheduler: EventScheduler | None = None,
     ) -> None:
         self.agents = agents
+        self.graph = graph
         self._name_to_id: dict[str, str] = {a.name: a.entity_id for a in agents}
         self.total_rounds = total_rounds
         self._log = log_fn or (lambda p, m: None)
-        self._event_history: list[dict[str, Any]] = []
         self._preprocessor = preprocessor
         self._chat_fn = chat_fn
         self._immutable_goals: list[str] = list(pre_goals or [])
@@ -132,6 +132,10 @@ class SimulationEngine:
         if mandate_text:
             self._log("simulation", f"第{round_number}轮蓝图事件: {mandate_text[:80]}...")
 
+        # 每轮清除 LanceDB 动态检索缓存，确保新事件可被检索
+        if self._preprocessor is not None:
+            self._preprocessor.clear_round_cache()
+
         alive_agents = self.agents
         decisions: list[dict[str, Any]] = []
 
@@ -148,16 +152,23 @@ class SimulationEngine:
             if st is None:
                 continue
             others = self._build_others_ctx(agent.entity_id, alive_agents)
-            dyn, static = await self._retrieve_memory(agent, round_number)
-            recent = "\n".join(
-                f"- [{e.get('round','?')}] {e.get('agent_name','?')}: {e.get('content','')[:80]}"
-                for e in self._event_history[-5:]
-            ) or "（无近期事件）"
+            dyn, static, kuzu_self = await self._retrieve_memory(agent, round_number)
+            rel_ctx = self._build_relation_context(agent.entity_id)
+            recent = self._build_recent_context()
+
+            # 增强记忆：LanceDB 语义 + Kuzu 精确时间线
+            memory_parts = []
+            if kuzu_self:
+                memory_parts.append(f"【你最近做过的事】\n{kuzu_self}")
+            if dyn:
+                memory_parts.append(f"【相关历史记忆】\n{dyn}")
+            enhanced_dynamic = "\n\n".join(memory_parts) or dyn
 
             dec = await self.reasoner.reason_narrative(
                 agent=agent, round_number=round_number, state=st,
                 event_mandate=mandate_text, correction_level=correction_level,
-                other_context=others, static_knowledge=static, dynamic_memory=dyn,
+                other_context=others, relationship_context=rel_ctx,
+                static_knowledge=static, dynamic_memory=enhanced_dynamic,
                 recent_events=recent, env_context=self._env_context(),
                 cached_action_catalog=self._cached_action_catalog(),
             )
@@ -193,6 +204,9 @@ class SimulationEngine:
                 parts.append(f"[剧情建议] {st}")
             self._round_mandate = "；".join(parts)
 
+        if self._preprocessor is not None:
+            self._preprocessor.clear_round_cache()
+
         alive_agents = self.agents
         decisions: list[dict[str, Any]] = []
 
@@ -209,15 +223,21 @@ class SimulationEngine:
             if st is None:
                 continue
             others = self._build_others_ctx(agent.entity_id, alive_agents)
-            dyn, static = await self._retrieve_memory(agent, round_number)
-            recent = "\n".join(
-                f"- [{e.get('round','?')}] {e.get('agent_name','?')}: {e.get('content','')[:80]}"
-                for e in self._event_history[-5:]
-            ) or "（无近期事件）"
+            dyn, static, kuzu_self = await self._retrieve_memory(agent, round_number)
+            rel_ctx = self._build_relation_context(agent.entity_id)
+            recent = self._build_recent_context()
+
+            memory_parts = []
+            if kuzu_self:
+                memory_parts.append(f"【你最近做过的事】\n{kuzu_self}")
+            if dyn:
+                memory_parts.append(f"【相关历史记忆】\n{dyn}")
+            enhanced_dynamic = "\n\n".join(memory_parts) or dyn
 
             dec = await self.reasoner.reason_quantified(
                 agent=agent, round_number=round_number, state=st,
-                other_context=others, static_knowledge=static, dynamic_memory=dyn,
+                other_context=others, relationship_context=rel_ctx,
+                static_knowledge=static, dynamic_memory=enhanced_dynamic,
                 recent_events=recent, env_context=self._env_context(),
                 cached_action_catalog=self._cached_action_catalog(),
             )
@@ -298,14 +318,6 @@ class SimulationEngine:
                 content=content,
                 driver=dec.get("driver", "freeform"),
             ))
-            self._event_history.append({
-                "agent": actor, "agent_name": name,
-                "action": dec.get("action_type", "?"), "content": content,
-                "round": round_number,
-            })
-
-        if len(self._event_history) > 200:
-            self._event_history = self._event_history[-200:]
 
         if self._persist_events:
             for action in sim_round.actions:
@@ -329,8 +341,9 @@ class SimulationEngine:
 
     # ── Helpers ──
 
-    async def _retrieve_memory(self, agent: Any, round_number: int) -> tuple[str, str]:
-        dyn, static = "", ""
+    async def _retrieve_memory(self, agent: Any, round_number: int) -> tuple[str, str, str]:
+        """Retrieve memory: LanceDB static + dynamic + Kuzu self-events."""
+        dyn, static, kuzu_self = "", "", ""
         if self._preprocessor is not None:
             query = getattr(agent, "persona", "") + " " + getattr(agent, "name", "")
             try:
@@ -341,7 +354,31 @@ class SimulationEngine:
                 dyn = self._preprocessor.retrieve_dynamic_events(query, top_k=3)
             except Exception:
                 pass
-        return (dyn or "（无近期动态事件）"), (static or "（无原著参考）")
+        # Kuzu self-events: precise timeline of own actions
+        if self.graph is not None:
+            try:
+                events = self.graph.get_recent_events_for_agent(
+                    getattr(agent, "entity_id", agent.name), last_n=5)
+                if events:
+                    kuzu_self = "；\n".join(
+                        f"[R{e['round']}] {e['action']}: {e['description'][:100]}"
+                        for e in events)
+            except Exception:
+                pass
+        return (dyn or "（无近期动态事件）"), (static or "（无原著参考）"), kuzu_self
+
+    def _build_recent_context(self) -> str:
+        """近期全局事件 → 替代内存中的 _event_history。"""
+        if self.graph is None:
+            return "（无近期事件）"
+        try:
+            events = self.graph.get_recent_global_events(last_n=5)
+        except Exception:
+            return "（无近期事件）"
+        return "\n".join(
+            f"- [{e['round']}] {e['agent_name']}: {e['content'][:80]}"
+            for e in events
+        ) or "（无近期事件）"
 
     def _build_others_ctx(self, self_id: str, alive_agents: list) -> str:
         lines = []
@@ -353,6 +390,40 @@ class SimulationEngine:
                 continue
             lines.append(st.to_prompt_context())
         return "\n".join(lines) or "（无其他参与方）"
+
+    def _build_relation_context(self, entity_id: str) -> str:
+        """从 Kuzu 图谱查询实体的关系邻居，构建自然语言关系摘要。"""
+        if self.graph is None:
+            return ""
+        try:
+            nb = self.graph.get_entity_neighbors(entity_id)
+        except Exception:
+            return ""
+        neighbors = nb.get("neighbors", [])
+        if not neighbors:
+            return ""
+        allies: list[str] = []
+        foes: list[str] = []
+        others: list[str] = []
+        for n in neighbors:
+            rel = n.get("relation", "") or ""
+            name = n.get("name", "")
+            if not name:
+                continue
+            if any(k in rel for k in ("盟", "友", "支持", "合作", "部下", "下属", "效忠", "追随", "ally", "support", "friend", "loyal")):
+                allies.append(name)
+            elif any(k in rel for k in ("敌", "对立", "对抗", "对手", "竞争", "冲突", "背叛", "仇", "攻击", "威胁", "rival", "enemy", "hostil", "oppos", "betray")):
+                foes.append(name)
+            else:
+                others.append(name)
+        parts = []
+        if allies:
+            parts.append(f"盟友：{'、'.join(allies[:5])}")
+        if foes:
+            parts.append(f"对手：{'、'.join(foes[:5])}")
+        if others:
+            parts.append(f"关联：{'、'.join(others[:5])}")
+        return " · ".join(parts) if parts else ""
 
     def _env_context(self) -> str:
         if not self._env:

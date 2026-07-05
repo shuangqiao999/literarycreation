@@ -65,10 +65,6 @@ class DeductionGraphStore:
                 "CREATE REL TABLE IF NOT EXISTS ACTED("
                 "FROM Agent TO Event, action STRING, timestamp STRING)"
             )
-            # 因果链(硬档)：行动指向的目标 + 对目标各指标的精确数值影响
-            self._conn.execute(
-                "CREATE REL TABLE IF NOT EXISTS TARGETS(FROM Event TO Entity)"
-            )
             self._conn.execute(
                 "CREATE REL TABLE IF NOT EXISTS CAUSED("
                 "FROM Event TO Entity, metric STRING, amount DOUBLE)"
@@ -158,26 +154,6 @@ class DeductionGraphStore:
                 {"aid": agent_id, "eid": event_id, "act": action, "ts": timestamp},
             )
 
-    def add_targets(self, event_id: str, target_id: str) -> None:
-        """事件指向的目标实体（因果链：行动作用于谁）。"""
-        self._check_conn()
-        with self._lock:
-            self._conn.execute(
-                f"MATCH (ev:{self.EVENT_TABLE} {{id: $eid}}), (e:{self.NODE_TABLE} {{id: $tid}}) "
-                "CREATE (ev)-[:TARGETS]->(e)",
-                {"eid": event_id, "tid": target_id},
-            )
-
-    def add_caused(self, event_id: str, target_id: str, metric: str, amount: float) -> None:
-        """事件对目标某指标造成的精确数值影响（因果链：造成什么后果）。"""
-        self._check_conn()
-        with self._lock:
-            self._conn.execute(
-                f"MATCH (ev:{self.EVENT_TABLE} {{id: $eid}}), (e:{self.NODE_TABLE} {{id: $tid}}) "
-                "CREATE (ev)-[:CAUSED {metric: $m, amount: $a}]->(e)",
-                {"eid": event_id, "tid": target_id, "m": metric, "a": float(amount)},
-            )
-
     # ── Query helpers ──
 
     def query(self, cypher: str, params: dict | None = None) -> list[list[Any]]:
@@ -258,6 +234,31 @@ class DeductionGraphStore:
                 })
         return list(grouped.values())
 
+    def get_recent_events_for_agent(self, agent_id: str, last_n: int = 5) -> list[dict[str, Any]]:
+        """查询某智能体最近 N 条事件（按轮次倒序），用于增强角色自我记忆。"""
+        rows = self.query(
+            f"MATCH (a:{self.AGENT_TABLE} {{id: $aid}})-[:ACTED]->(ev:{self.EVENT_TABLE}) "
+            "RETURN ev.round, ev.event_type, ev.description, ev.driver "
+            f"ORDER BY ev.round DESC LIMIT {int(last_n)}",
+            {"aid": agent_id},
+        )
+        return [{"round": r[0] if r[0] is not None else 0, "action": r[1] or "",
+                 "description": (r[2] or "")[:300], "driver": r[3] or ""} for r in rows]
+
+    def get_recent_global_events(self, last_n: int = 5) -> list[dict[str, Any]]:
+        """全局最近 N 条事件，替代内存中的 _event_history。"""
+        rows = self.query(
+            f"MATCH (a:{self.AGENT_TABLE})-[:ACTED]->(ev:{self.EVENT_TABLE}) "
+            "RETURN a.name, ev.round, ev.event_type, ev.description "
+            f"ORDER BY ev.round DESC LIMIT {int(last_n)}"
+        )
+        events = []
+        for r in rows:
+            events.append({"agent_name": r[0] or "?", "round": r[1] if r[1] is not None else 0,
+                           "action": r[2] or "", "content": (r[3] or "")[:200]})
+        events.reverse()
+        return events
+
     def get_event_sequence(self, limit: int = 40) -> list[dict[str, Any]]:
         """全局按时间排序的事件序列（供因果链分析）。"""
         rows = self.query(
@@ -272,90 +273,15 @@ class DeductionGraphStore:
         } for r in rows]
         return seq[-limit:] if limit and len(seq) > limit else seq
 
-    # ── 因果链（硬档）：基于 CAUSED 边的确定性归因 ──
-
-    def get_outcome_attribution(self, entity_id: str) -> dict[str, Any]:
-        """对某实体：按来源 agent 汇总 CAUSED 数值（负=致衰、正=助益），排名主因。"""
-        rows = self.query(
-            f"MATCH (a:{self.AGENT_TABLE})-[:ACTED]->(ev:{self.EVENT_TABLE})"
-            f"-[c:CAUSED]->(e:{self.NODE_TABLE} {{id: $id}}) "
-            "RETURN a.name, c.metric, sum(c.amount)",
-            {"id": entity_id},
-        )
-        by_source: dict[str, dict[str, float]] = {}
-        for r in rows:
-            src = r[0] or "?"
-            metric = r[1] or ""
-            amt = float(r[2]) if r[2] is not None else 0.0
-            m = by_source.setdefault(src, {})
-            m[metric] = m.get(metric, 0.0) + amt
-        contributors = []
-        for src, metrics in by_source.items():
-            harm = sum(v for v in metrics.values() if v < 0)
-            benefit = sum(v for v in metrics.values() if v > 0)
-            contributors.append({
-                "source": src, "harm": round(harm, 2), "benefit": round(benefit, 2),
-                "by_metric": {k: round(v, 2) for k, v in metrics.items()},
-            })
-        contributors.sort(key=lambda x: x["harm"])  # 最负(致衰最重)在前
-        return {"entity_id": entity_id, "contributors": contributors}
-
     def get_causal_summary(self, limit: int = 15) -> list[dict[str, Any]]:
-        """全局"源→目标 累计指标影响"摘要，按致衰程度排序（供报告确定性归因）。"""
-        rows = self.query(
-            f"MATCH (a:{self.AGENT_TABLE})-[:ACTED]->(ev:{self.EVENT_TABLE})"
-            f"-[c:CAUSED]->(e:{self.NODE_TABLE}) "
-            "RETURN a.name, e.name, c.metric, sum(c.amount)"
-        )
-        items = [{
-            "source": r[0] or "?", "target": r[1] or "?", "metric": r[2] or "",
-            "amount": round(float(r[3]), 1) if r[3] is not None else 0.0,
-        } for r in rows]
-        items.sort(key=lambda x: x["amount"])
-        return items[:limit]
-
-    def get_causal_subgraph(self, limit: int = 3000) -> dict[str, Any]:
-        """因果子图（Agent→Event→Entity，CAUSED 带 metric/amount），供前端因果视图。
-
-        ACTED 上限 3000 + CAUSED 上限 12000，确保大量轮次时仍覆盖全图。
-        当 CAUSED 引用了 ACTED 批次以外的 Event ID 时，自动补全 Event 节点，
-        避免前端出现"零散圆锥体、无线条"的孤儿节点。
-        """
-        nodes: dict[str, dict[str, Any]] = {}
-        links: list[dict[str, Any]] = []
+        """全局 Agent→Event 行动摘要，按时间倒序。"""
         rows = self.query(
             f"MATCH (a:{self.AGENT_TABLE})-[:ACTED]->(ev:{self.EVENT_TABLE}) "
-            "RETURN a.id, a.name, a.background, ev.id, ev.event_type, ev.round, ev.description "
-            f"ORDER BY ev.round LIMIT {int(limit)}"
+            "RETURN a.name, ev.event_type, ev.description, ev.round "
+            f"ORDER BY ev.round DESC LIMIT {int(limit)}"
         )
-        for r in rows:
-            aid, aname, abg, eid, etype, rnd, edesc = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
-            nodes.setdefault(aid, {"id": aid, "kind": "agent", "label": aname or aid[:8],
-                                   "desc": (abg or "")[:120]})
-            nodes.setdefault(eid, {"id": eid, "kind": "event",
-                                   "label": f"R{rnd or 0}:{etype or ''}",
-                                   "desc": (edesc or "")[:80]})
-            links.append({"source": aid, "target": eid, "type": "ACTED", "label": etype or ""})
-        crows = self.query(
-            f"MATCH (ev:{self.EVENT_TABLE})-[c:CAUSED]->(e:{self.NODE_TABLE}) "
-            f"RETURN ev.id, e.id, e.name, e.description, c.metric, c.amount LIMIT {int(limit) * 4}"
-        )
-        for r in crows:
-            eid, tid, tname, tdesc, metric, amount = r[0], r[1], r[2], r[3], r[4], r[5]
-            nodes.setdefault(eid, {"id": eid, "kind": "event",
-                                   "label": f"EV:{eid[:8]}", "desc": ""})
-            nodes.setdefault(tid, {"id": tid, "kind": "entity", "label": tname or tid[:8],
-                                   "desc": (tdesc or "")[:120]})
-            lbl = f"{metric}{amount:+.0f}" if amount is not None else (metric or "")
-            links.append({"source": eid, "target": tid, "type": "CAUSED", "label": lbl})
-        # 硬上限：预防极端数据量导致前端力导图卡死
-        MAX_NODES = 5000
-        node_list = list(nodes.values())
-        if len(node_list) > MAX_NODES:
-            node_list = node_list[:MAX_NODES]
-            keep_ids = {n["id"] for n in node_list}
-            links = [l for l in links if l["source"] in keep_ids and l["target"] in keep_ids]
-        return {"nodes": node_list, "links": links}
+        return [{"source": r[0] or "?", "action": r[1] or "", "description": str(r[2] or "")[:120],
+                 "round": r[3] if r[3] is not None else 0} for r in rows]
 
     def export_graph_data(self) -> dict[str, Any]:
         self._check_conn()

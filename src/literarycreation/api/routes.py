@@ -421,9 +421,8 @@ async def get_causal(session_id: str, request: Request):
         raise HTTPException(404, "Session not found")
     graph = engine.get_graph(session_id)
     try:
-        sub = graph.get_causal_subgraph()
-        sub["summary"] = graph.get_causal_summary()
-        return sub
+        summary = graph.get_causal_summary()
+        return {"nodes": [], "links": [], "summary": summary}
     except Exception as e:
         logger.warning("[LiteraryCreation] causal query failed: %s", e)
         return {"nodes": [], "links": [], "summary": []}
