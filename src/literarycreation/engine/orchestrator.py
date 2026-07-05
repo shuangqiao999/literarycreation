@@ -543,6 +543,11 @@ class DeductionOrchestrator:
 
         rounds = list(getattr(self, "_simulation_rounds", []))
         style = getattr(self, "_style", "现实主义")
+        # 优先从规则包读取风格（domain 决定 style），config.style 作为可选的覆盖
+        if self._rule_engine is not None and hasattr(self._rule_engine, "pack"):
+            pack_style = self._rule_engine.pack.get("style")
+            if pack_style:
+                style = str(pack_style)
         outline = getattr(self, "_outline", None)
         target_words = int(getattr(self, "_target_words", 0) or 0)
 

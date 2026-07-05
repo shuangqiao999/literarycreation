@@ -127,12 +127,12 @@ export default function App() {
   const [tokenData, setTokenData] = useState<TokenStats | null>(null);
   const [timelineView, setTimelineView] = useState<"timeline" | "causal">("timeline");
   const [mainTab, setMainTab] = useState<"graph" | "report" | "logs" | "timeline" | "optimize" | "token" | "dashboard">("graph");
-  const [domain, setDomain] = useState("literary");
+  const [domain, setDomain] = useState("literary_realism");
   const [domains, setDomains] = useState<Array<{domain:string;name:string}>>([]);
 
   // ── 文学创作（Mode 1 续写 / Mode 2 提纲复现）──
   const [inputMode, setInputMode] = useState<"seed" | "outline">("seed");
-  const [style, setStyle] = useState("现实主义");
+  const [style, setStyle] = useState("");
   const [chapters, setChapters] = useState(10);
   const [targetWords, setTargetWords] = useState(100000);
   const LIT_METRICS = ["trust", "tension", "affection", "power", "mystery", "fatigue"] as const;
@@ -390,7 +390,7 @@ export default function App() {
     }
     setCreating(true);
     try {
-      const config: any = { domain: "literary", style, target_words: targetWords };
+      const config: any = { domain, target_words: targetWords };
       if (inputMode === "outline") {
         const toNum = (o: Record<string, string>) => {
           const r: Record<string, number> = {};
@@ -401,7 +401,7 @@ export default function App() {
           characters: validChars.map(c => ({ name: c.name.trim(), arc: c.arc.trim(),
             initial_state: toNum(c.initial), final_state: toNum(c.final) })),
           key_events: keyEvents.filter(e => e.event.trim()).map(e => ({ round: e.round, event: e.event.trim() })),
-          chapters, style,
+          chapters,
         };
       }
       const r = await fetch(`${API_BASE}/session`, {
@@ -416,7 +416,7 @@ export default function App() {
       }
     } catch { /* ignore */ }
     setCreating(false);
-  }, [title, sourceMaterial, inputMode, style, chapters, targetWords, characters, keyEvents]);
+  }, [title, sourceMaterial, inputMode, chapters, targetWords, characters, keyEvents, domain]);
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -708,12 +708,15 @@ export default function App() {
             onChange={e => setPreGoal(e.target.value)}
           />
           <select
-            value={style}
-            onChange={e => setStyle(e.target.value)}
+            value={domain}
+            onChange={e => setDomain(e.target.value)}
             title="叙事风格"
             style={{ height: 32, marginBottom: 6, width: "100%", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, fontSize: 13 }}
           >
-            {["现实主义", "浪漫主义", "悬疑", "史诗", "宫廷剧"].map(s => <option key={s} value={s}>🎨 {s}</option>)}
+            {domains.length > 0
+              ? domains.map(d => <option key={d.domain} value={d.domain}>{d.name}</option>)
+              : ["现实主义", "浪漫主义", "悬疑", "史诗", "宫廷剧"].map(s => <option key={s} value={s}>🎨 {s}</option>)
+            }
           </select>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
             {(["seed", "outline"] as const).map(m => (

@@ -12,7 +12,8 @@ from ._utils import extract_text
 
 logger = logging.getLogger(__name__)
 
-_STYLES = ("现实主义", "浪漫主义", "悬疑", "史诗", "宫廷剧")
+# Style is now configured per rule pack, not hardcoded
+_DEFAULT_STYLE = "现实主义"
 
 _PROSE_PROMPT = """你是一位资深文学作家。请根据以下推演结果，续写或复现一部小说/剧本的正文。
 
@@ -67,7 +68,7 @@ class ProseRenderer:
 
     def __init__(self, llm_client: Any = None, style: str = "现实主义") -> None:
         self._llm = llm_client
-        self.style = style if style in _STYLES or style else "现实主义"
+        self.style = style or _DEFAULT_STYLE
 
     def _client(self) -> Any:
         if self._llm is None:

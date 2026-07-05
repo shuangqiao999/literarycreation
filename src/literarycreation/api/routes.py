@@ -487,9 +487,12 @@ async def update_settings(session_id: str, req: SettingsRequest, request: Reques
 
 @router.get("/domains")
 async def list_domains_route():
-    """返回所有已加载规则包的 domain / name 列表（内置 + 自定义）。"""
+    """返回所有文学风格规则包 domain / name 列表（内置 + 自定义）。"""
     from literarycreation.core.rule_templates import list_domains as get_domains
-    return {"domains": get_domains()}
+    all_domains = get_domains()
+    # 只返回文学风格规则包（literary_* 前缀）
+    literary_domains = [d for d in all_domains if d["domain"].startswith("literary_")]
+    return {"domains": literary_domains}
 
 
 class RulesUpload(BaseModel):
