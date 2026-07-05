@@ -1,0 +1,166 @@
+name: Build Release (Windows · NSIS Installer)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（如 v0.1.0），留空从 pyproject.toml 自动获取"
+        required: false
+        default: ""
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  get_version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      tag: ${{ steps.get_version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 获取版本号
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            VERSION="${TAG#v}"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAG="${{ github.ref_name }}"
+          else
+            VERSION=$(grep -m 1 '^version' pyproject.toml | cut -d'"' -f2)
+            TAG="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version: ${VERSION}  tag: ${TAG}"
+
+  create_release:
+    needs: get_version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 创建草稿发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.get_version.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+
+  windows_build:
+    needs: [create_release, get_version]
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ needs.get_version.outputs.tag }}
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 显示构建信息
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo " LiteraryCreation  文学创作助手"
+          echo "=========================================="
+          echo " 版本: $RELEASE_TAG"
+          echo " Python: 3.11"
+          echo " 依赖: kuzu, lancedb, numba, numpy, pyarrow"
+          echo " 输出: LiteraryCreation_Setup.exe (NSIS)"
+          echo "=========================================="
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/literary-creation/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/literary-creation/src-tauri -> target
+          prefix-key: "release-windows-literary"
+
+      - name: 安装 UPX
+        shell: bash
+        run: |
+          curl -L -o upx.zip https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-win64.zip
+          unzip -o upx.zip
+          mkdir -p $HOME/bin && cp upx-4.2.4-win64/upx.exe $HOME/bin/
+          echo "$HOME/bin" >> $GITHUB_PATH
+          upx --version
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install "pyinstaller>=6.18.0"
+
+      - name: 显示关键依赖版本
+        shell: bash
+        run: |
+          python -c "import numpy; print('numpy', numpy.__version__)"
+          python -c "import numba; print('numba', numba.__version__)"
+          python -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
+
+      - name: PyInstaller 打包
+        run: |
+          python -m PyInstaller literary-creation-backend.spec --noconfirm
+
+      - name: 拷贝 data/ 到 dist
+        shell: bash
+        run: |
+          mkdir -p dist/literary-creation-backend/data/rule/custom
+          cp -r data/rule/rules.json dist/literary-creation-backend/data/rule/
+
+      - name: 拷入 Tauri 资源目录
+        shell: bash
+        run: |
+          RES="apps/literary-creation/src-tauri/resources"
+          mkdir -p "$RES"
+          rm -rf "$RES/literary-creation-backend"
+          cp -r dist/literary-creation-backend "$RES/literary-creation-backend"
+
+      - name: 安装前端依赖
+        working-directory: apps/literary-creation
+        run: npm ci
+
+      - name: Tauri 构建 (NSIS)
+        working-directory: apps/literary-creation
+        timeout-minutes: 180
+        run: npx tauri build --bundles nsis
+
+      - name: 收集安装包
+        shell: bash
+        run: |
+          RELEASE_DIR="release"
+          rm -rf "$RELEASE_DIR"
+          mkdir -p "$RELEASE_DIR"
+          cp apps/literary-creation/src-tauri/target/release/bundle/nsis/LiteraryCreation_*_x64-setup.exe "$RELEASE_DIR/LiteraryCreation_Setup.exe"
+          echo "产物:"
+          ls -lh "$RELEASE_DIR"
+
+      - name: 上传安装包到 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload "$RELEASE_TAG" release/LiteraryCreation_Setup.exe --clobber
