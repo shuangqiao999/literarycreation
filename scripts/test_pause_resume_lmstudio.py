@@ -27,7 +27,6 @@ from literarycreation.engine.models import DeductionAgentProfile
 from literarycreation.engine.rule_engine import RuleEngine
 from literarycreation.engine.simulator import SimulationEngine
 from literarycreation.engine.orchestrator import _PhaseCancelledError
-from literarycreation.algorithms.module_utils import build_module_chain
 
 
 def banner(text: str) -> None:
@@ -72,7 +71,7 @@ async def test_pause_resume():
         states[a.entity_id] = state
 
     # ── 构建算法模块链 ──
-    algo_modules = build_module_chain(re_engine)
+    algo_modules = []
     print(f"  算法模块: {len(algo_modules)} 个")
 
     # ── 第 0 轮：初始状态 ──

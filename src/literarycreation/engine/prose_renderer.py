@@ -87,19 +87,49 @@ class ProseRenderer:
         prev_tail: str,
         outline_event: str = "",
         target_words: int = 0,
+        chapter_context: Any = None,
     ) -> str:
-        """逐章生成：生成第 chapter_idx 章正文。LLM 失败时降级为结构化摘要。"""
+        """逐章生成：生成第 chapter_idx 章正文。
+
+        若提供 chapter_context (ChapterContext)，则使用结构化数据注入更强的上下文。
+        LLM 失败时降级为结构化摘要。
+        """
         states_txt = "\n".join(
             f"- {v.get('name', k)}：" + "，".join(
                 f"{mk}={float(mv):.0f}" for mk, mv in (v.get("metrics") or {}).items())
             for k, v in (round_states or {}).items()
         ) or "（无角色状态）"
-
         ev_parts = [str(e)[:160] for e in (round_events or []) if e]
         if round_narration:
             ev_parts.insert(0, f"本轮概述：{round_narration[:200]}")
-        if outline_event:
-            ev_parts.insert(0, f"【本章必须推动】{outline_event}")
+
+        # 优先使用结构化 ChapterContext
+        ctx_block = ""
+        if chapter_context is not None:
+            ctx_parts = []
+            phase = getattr(chapter_context, "narrative_phase", "")
+            if phase:
+                ctx_parts.append(f"叙事阶段: {phase}")
+            mand = getattr(chapter_context, "mandatory_events", [])
+            if mand:
+                ctx_parts.append("【本章必须推动】" + "；".join(
+                    e.get("description", "") for e in mand))
+            soft = getattr(chapter_context, "soft_goals", [])
+            if soft:
+                ctx_parts.append("【本章建议推动】" + "；".join(
+                    e.get("description", "") for e in soft))
+            snap = getattr(chapter_context, "character_snapshots", {})
+            if snap:
+                snap_lines = []
+                for name, ms in snap.items():
+                    snap_lines.append(f"  {name}：" + "，".join(f"{k}={v:.0f}" for k, v in ms.items()))
+                ctx_parts.append("角色当前状态：\n" + "\n".join(snap_lines))
+            ctx_block = "\n".join(ctx_parts)
+        elif outline_event:
+            ctx_block = f"【本章必须推动】{outline_event}"
+
+        if ctx_block:
+            ev_parts.insert(0, ctx_block)
         events_txt = "\n".join(f"- {p}" for p in ev_parts) or "（承接前文自然推进）"
 
         length_req = (f"本章篇幅约 {target_words} 字（可上下浮动 15%）。"

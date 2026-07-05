@@ -26,7 +26,6 @@ os.environ.setdefault("FORGE_LLM_MODEL", "google/gemma-4-12b")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from literarycreation.engine.rule_engine import RuleEngine
-from literarycreation.algorithms.module_utils import build_pipeline, ConfigValidationError
 
 PASS, FAIL = 0, 0
 
@@ -45,23 +44,6 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAIL += 1
         print(f"  \u2717 {name} FAILED {detail}")
-
-
-# ── Test 1: All 8 domains pass FSM validation ──
-def test_fsm_validation():
-    banner("Test 1: 8领域 FSM配置校验")
-    domains = ["military", "business", "politics", "ecology", "urban", "tech", "info_war", "geo_strategy"]
-    for domain in domains:
-        try:
-            re = RuleEngine.from_domain(domain)
-            engine = build_pipeline(re)
-            mods = [engine.get(n) for n in re.pack["modules"]["pipeline"]["order"] if engine.get(n)]
-            names = [m.name for m in mods]
-            check(f"{domain}: pipeline加载成功", len(mods) >= 2, f"modules: {names}")
-        except ConfigValidationError as e:
-            check(f"{domain}: 校验通过", False, str(e))
-        except Exception as e:
-            check(f"{domain}: 加载成功", False, str(e))
 
 
 # ── Test 2: Specific FSM rules are correct ──
@@ -110,7 +92,6 @@ async def test_full_pipeline():
 
     from literarycreation.engine.models import DeductionAgentProfile, EntityState
     from literarycreation.engine.simulator import SimulationEngine
-    from literarycreation.algorithms.module_utils import build_module_chain
 
     re = RuleEngine.from_domain("military")
     metrics = re.metrics()
@@ -134,7 +115,7 @@ async def test_full_pipeline():
         states[a.entity_id] = EntityState(id=a.entity_id, name=a.name, domain="military",
                                           metrics=dict(init_m), history=[])
 
-    modules = build_module_chain(re)
+    modules = []
     print(f"  模块: {[m.name for m in modules]}")
 
     engine = SimulationEngine(
@@ -174,7 +155,6 @@ async def main():
     print("  LiteraryCreation FSM配置修复验证 (12b)")
     print("=" * 65)
 
-    test_fsm_validation()
     test_fsm_rules()
     await test_full_pipeline()
 

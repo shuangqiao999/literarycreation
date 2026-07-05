@@ -423,25 +423,15 @@ class DeductionOrchestrator:
 
         from .simulator import SimulationEngine
 
-        # 构建算法模块链（文学域: outline_control + FSM + 节奏 + 一致性 + 冲突递进）
-        algorithm_modules = []
-        if re_engine is not None:
-            from literarycreation.algorithms.module_utils import build_module_chain
-            algorithm_modules = build_module_chain(re_engine)
-            # Mode 2: 用会话提纲配置 outline_control
-            outline = getattr(self, "_outline", None)
-            if outline:
-                pack_cfg = re_engine.pack.get("modules", {}).get("outline_control", {})
-                has_conflict_prog = outline.get("key_events") is not None
-                for m in algorithm_modules:
-                    if m.name == "outline_control":
-                        m.configure({**pack_cfg, "outline": outline,
-                                     "total_rounds": total_rounds})
-                        self._log("simulation", "提纲弧光门控已启用")
-                    if m.name == "conflict_progression" and has_conflict_prog:
-                        m.configure({"total_rounds": total_rounds})
-            self._log("simulation",
-                      f"算法模块加载: {', '.join(m.name for m in algorithm_modules)}")
+        # 模式判定：有提纲 → 蓝图执行模式（blueline），无提纲 → 自由续写模式（freeform）
+        outline = getattr(self, "_outline", None)
+        mode = "blueline" if (outline and outline.get("key_events")) else "freeform"
+        event_scheduler = None
+        if mode == "blueline" and outline:
+            from literarycreation.engine.event_scheduler import EventScheduler
+            event_scheduler = EventScheduler.from_outline(outline, total_rounds)
+            self._event_scheduler = event_scheduler
+            self._log("simulation", f"蓝图执行模式已启用: {len(outline.get('key_events', []))} 个关键事件")
 
         engine = SimulationEngine(
             agents=self._agents,
@@ -458,9 +448,10 @@ class DeductionOrchestrator:
             env={"weather": self._weather, "terrain": self._terrain} if (self._weather or self._terrain) else None,
             cancel_event=self._cancel,
             max_concurrent=getattr(self, "_max_concurrent", None),
-            algorithm_modules=algorithm_modules,
-            outline=getattr(self, "_outline", None),
+            outline=outline,
             fsm_override_store=self._fsm_override_store,
+            mode=mode,
+            event_scheduler=event_scheduler,
         )
 
         rounds: list[SimulationRound] = []
@@ -605,12 +596,24 @@ class DeductionOrchestrator:
                 narration = str(rnd.state_delta.get("narration", "") or "")
                 states = rnd.state_delta.get("states", {}) or {}
                 outline_event = "；".join(x for x in ev_by_round.get(rnd.round_number, []) if x)
+
+                # 构建 ChapterContext 传递给渲染器
+                chapter_ctx = None
+                if hasattr(self, "_event_scheduler") and self._event_scheduler is not None:
+                    try:
+                        chapter_ctx = self._event_scheduler.build_chapter_context(
+                            rnd.round_number, self._states, [],
+                            outline.get("characters", []) if outline else None)
+                    except Exception:
+                        pass
+
                 text = await renderer.render_chapter(
                     chapter_idx=i, total_chapters=n,
                     seed_text=self.session.source_material,
                     round_events=events, round_narration=narration,
                     round_states=states, prev_tail=prev_tail,
                     outline_event=outline_event, target_words=per_ch,
+                    chapter_context=chapter_ctx,
                 )
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 path = _write(fname, text)

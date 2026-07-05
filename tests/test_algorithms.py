@@ -1,97 +1,58 @@
-"""Smoke test for algorithm modules — literary domain."""
+"""Smoke test for reconstructed literary engine."""
 import numpy as np
-from literarycreation.algorithms import ModuleContext
-from literarycreation.algorithms.fsm_module import FiniteStateMachineModule
-from literarycreation.algorithms.outline_control import OutlineControlModule
-from literarycreation.algorithms.pacing_analyzer import PacingAnalyzerModule
-from literarycreation.algorithms.character_consistency import CharacterConsistencyModule
-from literarycreation.algorithms.conflict_progression import ConflictProgressionModule
+from literarycreation.algorithms import compute_deviation, resolve_correction, build_correction_prompt
+from literarycreation.engine.event_scheduler import EventScheduler, ScheduledEvent
 
-# Test FSM: character state transitions
-ctx = ModuleContext(round_number=1)
-ctx.arrays = {
-    "tension": np.array([80.0, 30.0], dtype=np.float64),
-    "trust": np.array([40.0, 60.0], dtype=np.float64),
-    "affection": np.array([30.0, 75.0], dtype=np.float64),
-}
-ctx.metadata["entity_ids"] = ["char_a", "char_b"]
-ctx.metadata["entity_names"] = ["Zhang San", "Li Si"]
+# Test deviation computation
+gap = compute_deviation("trust", 50.0, 80.0, 20.0, 5, 10, tolerance=10.0)
+print(f"Deviation: trust gap={gap:.1f} (current=50, target should be ~50)")
 
-fsm = FiniteStateMachineModule()
-fsm.configure({
-    "default_state": "neutral",
-    "command_states": ["crisis"],
-    "transition_rules": [
-        {"from": "neutral", "to": "crisis", "condition": {"tension": [">", 70]}},
-        {"from": "neutral", "to": "intimate", "condition": {"affection": [">", 70], "trust": [">", 50]}},
+gap2 = compute_deviation("trust", 80.0, 80.0, 20.0, 1, 10, tolerance=10.0)
+print(f"Deviation: trust gap={gap2:.1f} (current=80, target should be ~74)")
+
+# Test correction resolution
+level = resolve_correction({"trust": 5.0, "tension": 8.0}, tolerance=10.0)
+assert level == "none", f"Expected none, got {level}"
+print(f"Small gaps → {level} OK")
+
+level2 = resolve_correction({"trust": 25.0}, tolerance=10.0)
+assert level2 == "strong", f"Expected strong, got {level2}"
+print(f"Large gap → {level2} OK")
+
+level3 = resolve_correction({"trust": 35.0}, tolerance=10.0)
+assert level3 == "event_inject", f"Expected event_inject, got {level3}"
+print(f"Very large gap → {level3} OK")
+
+# Test correction prompt
+prompt = build_correction_prompt({0: {"trust": 25.0}}, "strong", {0: "Zhang San"})
+assert "强" in prompt, f"Prompt should be strong directive: {prompt}"
+print(f"Correction prompt: {prompt[:60]}... OK")
+
+# Test event scheduler
+outline = {
+    "key_events": [
+        {"round": 3, "event": "凌不弃密报沈夜通敌", "level": "hard"},
+        {"round": 5, "event": "沈夜开始怀疑凌不弃", "level": "soft"},
+        {"round": 7, "event": "可有可无的事件", "level": "optional"},
     ],
-    "action_map": {
-        "neutral": {"action_type": "observe", "intensity": 0.3},
-        "crisis": None,
-        "intimate": {"action_type": "confess", "intensity": 0.7},
-    },
-})
-ctx = fsm.execute(ctx)
-assert ctx.metadata["fsm.agent_states"][0] == "crisis", f"Expected crisis, got {ctx.metadata['fsm.agent_states'][0]}"
-assert ctx.metadata["fsm.agent_states"][1] == "intimate", f"Expected intimate, got {ctx.metadata['fsm.agent_states'][1]}"
-assert len(ctx.metadata["fsm.agent_actions"]) == 2
-assert ctx.metadata["fsm.agent_actions"][0] is None  # crisis -> LLM
-print(f"FSM: states={ctx.metadata['fsm.agent_states']} OK")
+    "characters": [
+        {"name": "凌不弃", "initial_state": {"trust": 80}, "final_state": {"trust": 20}},
+    ],
+}
+scheduler = EventScheduler.from_outline(outline, 10)
+events = scheduler.get_events_for_round(3)
+hard_events = [e for e in events if e.level == "hard"]
+assert len(hard_events) == 1, f"Expected 1 hard event, got {len(hard_events)}"
+print(f"Scheduler round 3: {hard_events[0].description} OK")
 
-# Test Outline Control
-ctx2 = ModuleContext(round_number=5)
-ctx2.arrays = {"trust": np.array([60.0], dtype=np.float64), "tension": np.array([30.0], dtype=np.float64)}
-ctx2.metadata["entity_names"] = ["Zhang San"]
+mandate = scheduler.get_mandate_text(3)
+assert "密报" in mandate, f"Mandate should contain event text: {mandate}"
+print(f"Mandate: {mandate} OK")
 
-oc = OutlineControlModule()
-oc.configure({
-    "deviation_threshold": 12.0,
-    "total_rounds": 10,
-    "outline": {"characters": [
-        {"name": "Zhang San", "initial_state": {"trust": 80, "tension": 20},
-         "final_state": {"trust": 20, "tension": 80}},
-    ]},
-})
-ctx2 = oc.execute(ctx2)
-nudges = ctx2.metadata.get("outline.nudges", [])
-print(f"Outline Control: nudges={nudges} OK")
+# Test catch-up window
+events5 = scheduler.get_events_for_round(5)
+soft = [e for e in events5 if e.level == "soft"]
+assert len(soft) == 1, f"Expected 1 soft event, got {len(soft)}"
+print(f"Scheduler round 5: {soft[0].description} OK")
 
-# Test Pacing Analyzer
-ctx3 = ModuleContext(round_number=1)
-ctx3.arrays = {"tension": np.array([40.0, 60.0, 80.0], dtype=np.float64), "trust": np.array([50.0, 50.0, 50.0], dtype=np.float64)}
-pa = PacingAnalyzerModule()
-pa.configure({"stall_threshold": 3, "rush_threshold": 30.0, "plateau_rounds": 4})
-ctx3 = pa.execute(ctx3)
-ctx3.round_number = 2
-ctx3.arrays["tension"] = np.array([90.0, 65.0, 85.0], dtype=np.float64)
-ctx3 = pa.execute(ctx3)
-score = ctx3.metadata.get("pacing.score", 0)
-print(f"Pacing Analyzer: score={score} OK")
-assert score is not None
-
-# Test Character Consistency
-ctx4 = ModuleContext(round_number=1)
-ctx4.arrays = {"trust": np.array([80.0], dtype=np.float64), "affection": np.array([50.0], dtype=np.float64)}
-ctx4.metadata["entity_ids"] = ["char_a"]
-ctx4.metadata["entity_names"] = ["Zhang San"]
-ctx4.metadata["consistency.decisions"] = [{"actor_id": "char_a", "action_type": "betray"}]
-
-cc = CharacterConsistencyModule()
-cc.configure({"warn_threshold": 0.7})
-ctx4 = cc.execute(ctx4)
-flags = ctx4.metadata.get("consistency.flags", [])
-print(f"Character Consistency: flags={flags} OK")
-
-# Test Conflict Progression
-ctx5 = ModuleContext(round_number=5)
-ctx5.arrays = {"tension": np.array([80.0, 70.0], dtype=np.float64)}
-
-cp = ConflictProgressionModule()
-cp.configure({"total_rounds": 10, "climax_min_tension": 65.0, "early_drop_threshold": 30.0})
-cp._tension_history = [20.0, 30.0, 45.0, 65.0]
-ctx5 = cp.execute(ctx5)
-phase = ctx5.metadata.get("conflict.arc_phase", "")
-warnings = ctx5.metadata.get("conflict.warnings", [])
-print(f"Conflict Progression: phase={phase}, warnings={warnings} OK")
-
-print("\nALL ALGORITHM TESTS PASSED")
+print("\nALL TESTS PASSED")

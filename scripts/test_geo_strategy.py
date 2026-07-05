@@ -105,8 +105,7 @@ async def main():
     # ── Phase 4: Quantified simulation with ODE+Physics ──
     print("\n--- Phase 4: 量化推演 (3 rounds) ---")
     states = {a.entity_id: re_engine.init_state(a.entity_id, a.name) for a in agents}
-    from literarycreation.algorithms.module_utils import build_module_chain
-    modules = build_module_chain(re_engine)
+    modules = []
     print(f"  模块: {', '.join(m.name for m in modules)}")
 
     _current_session.set("geo_test")

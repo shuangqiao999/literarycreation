@@ -18,7 +18,6 @@ sys.path.insert(0, os.path.join(_script, "..", "src"))
 from literarycreation.engine.rule_engine import RuleEngine
 from literarycreation.engine.models import DeductionAgentProfile, EntityState
 from literarycreation.engine.simulator import SimulationEngine
-from literarycreation.algorithms.module_utils import build_module_chain
 
 PASS = FAIL = 0
 ROUNDS = 20
@@ -48,7 +47,7 @@ async def test_context_stress():
         states[a.entity_id] = EntityState(id=a.entity_id, name=a.name, domain="military",
                                           metrics=dict(init_m), history=[])
 
-    modules = build_module_chain(re)
+    modules = []
     print(f"  模块: {[m.name for m in modules]}")
     print(f"  摘要模式: N={N_AGENTS} > 30 → {'启用' if N_AGENTS > 30 else '关闭'}")
 

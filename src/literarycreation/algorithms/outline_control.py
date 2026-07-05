@@ -1,90 +1,91 @@
-"""Outline Control — Mode 2 提纲复现的弧光门控模块（post-decision）。
+"""Outline Deviation Detection — pure metric comparison for arc tracking.
 
-按角色 initial_state→final_state 的线性插值算出每轮目标带，对比当前指标；
-偏离超阈值时产出 nudge（软提示），由 simulator 注入下一轮决策上下文与事件记忆，
-以「强软实现」逼近提纲弧光，而不直接改写状态（保住文本自然度）。
-
-无提纲（Mode 1 续写）时 execute() 立即返回，零副作用。
+Computes the gap between current character metrics and their target trajectory
+(linear interpolation from initial_state → final_state).
+Returns correction level: none, soft, strong, event_inject.
 """
 from __future__ import annotations
 
-from typing import Any
-
-from .base import AlgorithmModule, ModuleContext
+from typing import Any, Literal
 
 
-class OutlineControlModule(AlgorithmModule):
-    """提纲弧光门控——检测角色指标偏离目标轨迹并生成软性纠偏提示。
+CorrectionLevel = Literal["none", "soft", "strong", "event_inject"]
 
-    Reads:  ctx.arrays（角色指标）、ctx.metadata["entity_names"]（数组序↔角色名）。
-    Config: outline.characters（name→initial/final）、total_rounds、deviation_threshold。
-    Writes: ctx.metadata["outline.nudges"]、ctx.metadata["outline.arc_report"]。
+
+def compute_deviation(
+    metric: str,
+    current_value: float,
+    initial_value: float,
+    final_value: float,
+    round_number: int,
+    total_rounds: int,
+    tolerance: float = 10.0,
+) -> float:
+    """Compute the signed gap between actual and target for a single metric.
+
+    Returns positive gap if current is below target (needs to rise),
+    negative gap if current is above target (needs to drop).
     """
+    frac = min(1.0, max(0.0, round_number / max(1, total_rounds)))
+    target = initial_value + (final_value - initial_value) * frac
+    return target - current_value
 
-    REQUIRED_SIGNALS: list[str] = []
-    OUTPUT_SIGNALS: list[str] = ["outline.nudges", "outline.arc_report"]
-    IS_FINALIZER = False
 
-    def __init__(self) -> None:
-        self._chars: dict[str, dict[str, dict[str, float]]] = {}
-        self._total_rounds: int = 10
-        self._threshold: float = 12.0
+def resolve_correction(
+    gaps: dict[str, float],
+    tolerance: float = 10.0,
+) -> CorrectionLevel:
+    """Determine correction strength from a set of metric gaps.
 
-    @property
-    def name(self) -> str:
-        return "outline_control"
+    Args:
+        gaps: {metric_name: gap_value} where gap = target - actual
+        tolerance: max allowed gap before correction triggers
 
-    @property
-    def description(self) -> str:
-        return "提纲弧光门控——按角色目标轨迹检测偏离并生成软性纠偏提示"
+    Returns the strongest correction level needed.
+    """
+    max_gap = max(abs(g) for g in gaps.values()) if gaps else 0.0
+    if max_gap < tolerance:
+        return "none"
+    if max_gap < tolerance * 2:
+        return "soft"
+    if max_gap < tolerance * 3:
+        return "strong"
+    return "event_inject"
 
-    def configure(self, params: dict[str, Any]) -> None:
-        self._threshold = float(params.get("deviation_threshold", 12.0))
-        try:
-            self._total_rounds = max(1, int(params.get("total_rounds", 10)))
-        except (TypeError, ValueError):
-            self._total_rounds = 10
-        outline = params.get("outline") or {}
-        for c in outline.get("characters", []) or []:
-            name = c.get("name")
-            if not name:
-                continue
-            self._chars[name] = {
-                "initial": {k: float(v) for k, v in (c.get("initial_state") or {}).items()},
-                "final": {k: float(v) for k, v in (c.get("final_state") or {}).items()},
-            }
 
-    def execute(self, ctx: ModuleContext) -> ModuleContext:
-        if not self._chars:
-            return ctx
-        names: list[str] = ctx.metadata.get("entity_names", []) or []
-        if not names:
-            return ctx
-        frac = min(1.0, max(0.0, ctx.round_number / max(1, self._total_rounds)))
-        nudges: list[dict[str, Any]] = []
-        arc_report: list[dict[str, Any]] = []
-        for name, spec in self._chars.items():
-            if name not in names:
-                continue
-            idx = names.index(name)
-            for metric, init_v in spec["initial"].items():
-                fin_v = float(spec["final"].get(metric, init_v))
-                target = init_v + (fin_v - init_v) * frac
-                arr = ctx.arrays.get(metric)
-                if arr is None or idx >= len(arr):
-                    continue
-                cur = float(arr[idx])
-                gap = target - cur
-                arc_report.append({
-                    "name": name, "metric": metric,
-                    "target": round(target, 1), "current": round(cur, 1),
-                })
-                if abs(gap) > self._threshold:
-                    nudges.append({
-                        "name": name, "metric": metric,
-                        "direction": "提升" if gap > 0 else "降低",
-                        "gap": round(gap, 1),
-                    })
-        ctx.metadata["outline.nudges"] = nudges
-        ctx.metadata["outline.arc_report"] = arc_report
-        return ctx
+def build_correction_prompt(
+    gaps: dict[str, float],
+    level: CorrectionLevel,
+    entity_names: dict[int, str],
+) -> str:
+    """Build prompt text for correction injection.
+
+    Args:
+        gaps: {entity_index: {metric: gap}}
+        level: correction strength
+        entity_names: {index: name} mapping
+    """
+    if level == "none" or not gaps:
+        return ""
+
+    hints: list[str] = []
+    for idx, mgaps in gaps.items():
+        name = entity_names.get(idx, f"角色{idx}")
+        for metric, gap in mgaps.items():
+            direction = "提升" if gap > 0 else "降低"
+            hints.append(f"{name}的{metric}需{direction}{abs(gap):.0f}")
+
+    if not hints:
+        return ""
+
+    detail = "；".join(hints)
+    if level == "soft":
+        return f"[弧光提醒] {detail}"
+    if level == "strong":
+        return f"[弧光强制] 本轮必须优先推进以下指标：{detail}"
+    if level == "event_inject":
+        return (
+            f"[强剧情推力] 系统检测到重大偏离。以下指标的偏离已超过容许范围：{detail}\n"
+            "请引入外部事件迫使剧情转向目标方向。"
+        )
+    return ""

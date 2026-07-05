@@ -1,8 +1,8 @@
-"""Phase 4: Parallel Simulation — multi-agent with dual-path LanceDB memory recall.
+"""Phase 4: Simulation — dual-path LanceDB memory recall, dual-mode decisions.
 
-Dual-path retrieval:
-  Path A (static): retrieval from deduction_chunks table — original source material
-  Path B (dynamic): retrieval from deduction_events table — simulation-generated events
+Modes:
+  - blueline: Blueprint execution — key events are enforced, LLM dramatizes
+  - freeform: Free writing — agents decide freely, no forced events
 """
 from __future__ import annotations
 
@@ -14,13 +14,14 @@ import re
 import uuid
 from collections.abc import Callable
 from string import Template
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from literarycreation.storage.graph_store import DeductionGraphStore
 
 from ._utils import extract_text
+from .event_scheduler import EventScheduler
 from .models import DeductionAgentProfile, SimulationAction, SimulationRound
 from .orchestrator import _PhaseCancelledError
 from .preprocessor import DeductionPreprocessor
@@ -62,8 +63,6 @@ $recent_events
 
 只返回 JSON，不要解释。"""
 
-
-# 关系→盟友/对手的关键词启发式（中英），用于从 Kuzu RELATES 关系反哺决策与信任。
 _REL_ALLY_KW = ("盟", "同盟", "结盟", "联盟", "支持", "合作", "友", "部下", "下属",
                 "效忠", "追随", "ally", "allied", "support", "friend", "cooperat",
                 "subordinate", "loyal")
@@ -73,14 +72,7 @@ _REL_FOE_KW = ("敌", "对立", "对抗", "对手", "竞争", "冲突", "背叛"
 
 
 class SimulationEngine:
-    """多智能体并行模拟引擎 — 双路语义记忆。
-
-    决策上下文优先级:
-      1. 动态事件表 (LanceDB deduction_events) — 模拟中生成的事件, 语义检索
-      2. 静态原文表 (LanceDB deduction_chunks) — 原著背景, 语义检索
-      3. 近期缓存 (event_history[-5:]) — 最近 5 条全局事件
-      4. 智能体自身设定 (persona / background / goals)
-    """
+    """Multi-agent simulation engine with LanceDB dual-path memory and dual-mode decision."""
 
     def __init__(
         self,
@@ -106,6 +98,8 @@ class SimulationEngine:
         algorithm_modules: list | None = None,
         outline: dict[str, Any] | None = None,
         fsm_override_store: dict | None = None,
+        mode: Literal["freeform", "blueline"] = "freeform",
+        event_scheduler: EventScheduler | None = None,
     ) -> None:
         self.agents = agents
         self.graph = graph
@@ -117,11 +111,9 @@ class SimulationEngine:
         self._chat_fn = chat_fn
         self._immutable_goals: list[str] = list(pre_goals or [])
         self._cancel = cancel_event
-        # 蒙特卡洛隔离与可控性参数
         self._persist_events = persist_events
         self._temperature = temperature
         self._rng = random.Random(seed)
-        # 量化模式参数（rule_engine 非空即进入量化模式）
         self._rule_engine = rule_engine
         self._states: dict[str, Any] = states or {}
         self._quantified = rule_engine is not None
@@ -129,13 +121,13 @@ class SimulationEngine:
         self._env = env
         self._enable_multi_action = enable_multi_action
         self._max_actions = max(1, int(max_actions))
-        self._algorithm_modules: list = algorithm_modules or []
         self._outline: dict[str, Any] | None = outline
-        self._fsm_override_store: dict = fsm_override_store if fsm_override_store is not None else {}
+        self._fsm_override_store: dict = fsm_override_store or {}
+        self._mode = mode
+        self._scheduler = event_scheduler
         self._round_mandate: str = ""
         self._last_outline_nudges: list[dict[str, Any]] = []
         from literarycreation.core.config import config
-
         self._max_concurrent = (
             max_concurrent if max_concurrent is not None
             else config.deduction_max_concurrent
@@ -143,16 +135,11 @@ class SimulationEngine:
 
         from .strategic_reasoner import StrategicReasoner
         self.reasoner = StrategicReasoner(
-            candidate_count=config.deduction_candidate_count,
-            preprocessor=preprocessor,
             chat_fn=chat_fn,
+            preprocessor=preprocessor,
+            candidate_count=config.deduction_candidate_count,
             immutable_goals=self._immutable_goals,
-            temperature=temperature,
-            enable_multi_action=self._enable_multi_action,
-            max_actions=self._max_actions,
         )
-
-        # A. 关系反哺：开局一次性从 Kuzu 预取盟友/对手并播种信任(关系在一次推演内静态)
         self._rel_context: dict[str, dict] = {}
         self._build_relationship_context()
 
@@ -166,12 +153,6 @@ class SimulationEngine:
         return "neutral"
 
     def _build_relationship_context(self) -> None:
-        """开局一次性从 Kuzu 预取各 agent 的盟友/对手(关系静态)，缓存并播种信任矩阵。
-
-        顺序执行(非并发)，规避 Kuzu 单连接线程安全问题；运行中只读缓存，
-        不在并发 decide() 里查图。量化经 relationship_context 注入 Prompt，
-        定性额外经 seed_trust 影响打分/信任摘要。
-        """
         if self.graph is None or not self.agents:
             return
         for a in self.agents:
@@ -196,17 +177,11 @@ class SimulationEngine:
                 parts.append("盟友: " + "、".join(allies[:6]))
             if foes:
                 parts.append("对手: " + "、".join(foes[:6]))
-            self._rel_context[a.entity_id] = {
-                "allies": allies, "opponents": foes, "summary": "；".join(parts)}
+            self._rel_context[a.entity_id] = {"allies": allies, "opponents": foes, "summary": "；".join(parts)}
             if allies or foes:
                 self.reasoner.seed_trust(a.entity_id, allies, foes)
-        seeded = sum(1 for v in self._rel_context.values() if v["summary"])
-        if seeded:
-            self._log("simulation", f"关系反哺：{seeded} 个智能体注入图谱盟友/对手并播种信任")
 
-    # ── 用户强制 override（按体强制动作，跳过 FSM/LLM）──
     def _pop_override(self, agent: Any) -> dict | None:
-        """取出并消费该 agent 的强制动作（按名称或 entity_id 匹配）。remaining 归零即删除。"""
         store = self._fsm_override_store
         if not store:
             return None
@@ -232,457 +207,197 @@ class SimulationEngine:
             "intensity": float(ov.get("intensity", 0.6)),
             "target": str(ov.get("target", "") or ""),
             "rationale": f"[用户强制] {ov.get('action_type', 'observe')}"
-                         + (f" → {ov.get('target')}" if ov.get("target") else ""),
+                        + (f" → {ov.get('target')}" if ov.get("target") else ""),
         }
 
-    def _describe_fsm_action(self, agent: Any, state: str, action_type: str) -> str:
-        """FSM 确定性动作的数据差异化描述：突出该体当前最危险的受阈值约束指标。"""
-        st = self._states.get(agent.entity_id) if self._quantified else None
-        thresholds = self._rule_engine.thresholds() if self._rule_engine is not None else {}
-        if st is not None and thresholds:
-            worst_metric, worst_ratio, worst_val, worst_thr = None, None, None, None
-            for m, thr in thresholds.items():
-                try:
-                    thr_f = float(thr)
-                    val = float(st.get_metric(m))
-                except (TypeError, ValueError):
-                    continue
-                ratio = val / thr_f if thr_f > 0 else val
-                if worst_ratio is None or ratio < worst_ratio:
-                    worst_metric, worst_ratio, worst_val, worst_thr = m, ratio, val, thr_f
-            if worst_metric is not None:
-                tag = "告急" if worst_val <= worst_thr * 1.2 else "偏紧"
-                return f"{action_type}（{worst_metric}={worst_val:.0f}{tag}，阈值{worst_thr:.0f}｜{state}）"
-        return f"{action_type}（{state}）"
-
     async def run_round(self, round_number: int) -> SimulationRound:
-        if self._quantified:
-            return await self._run_round_quantified(round_number)
+        if not self._quantified:
+            return await self._run_nonquantified_round(round_number)
+        if self._mode == "blueline" and self._scheduler is not None:
+            return await self._run_round_blueline(round_number)
+        return await self._run_round_freeform(round_number)
 
+    # ── Mode B: Blueprint execution ──
+
+    async def _run_round_blueline(self, round_number: int) -> SimulationRound:
         from literarycreation.core.llm_client import DeductionLLMClient as LLMClient
-
-        sim_round = SimulationRound(round_number=round_number)
-        client = LLMClient()
+        re_engine = self._rule_engine
 
         ordered = list(self.agents)
         self._rng.shuffle(ordered)
-
-        sem = asyncio.Semaphore(self._max_concurrent)
-
-        async def process_agent(agent: DeductionAgentProfile) -> SimulationAction | None:
-            async with sem:
-                return await self._agent_decide(client, agent, round_number)
-
-        for agent in ordered:
-            if self._cancel is not None and self._cancel.is_set():
-                raise _PhaseCancelledError()
-            action = await process_agent(agent)
-            if action is not None:
-                sim_round.actions.append(action)
-                self._event_history.append({
-                    "agent": action.agent_id,
-                    "agent_name": getattr(
-                        next((a for a in self.agents if a.entity_id == action.agent_id), None),
-                        "name", action.agent_id[:8],
-                    ),
-                    "action": action.action_type,
-                    "content": action.content,
-                    "round": round_number,
-                    "timestamp": action.timestamp,
-                })
-
-        if len(self._event_history) > 200:
-            self._event_history = self._event_history[-200:]
-
-        # Write round events to Kuzu graph + LanceDB dynamic event table
-        # 蒙特卡洛隔离模式 (persist_events=False): 不落盘、不写向量库，仅保留内存事件历史，
-        # 保证 M×N 次模拟相互隔离、可并发，且不污染主会话数据。
-        if self._persist_events:
-            for action in sim_round.actions:
-                event_id = f"evt-{uuid.uuid4().hex[:8]}"
-                self.graph.add_event(
-                    event_id, action.content[:200], action.action_type,
-                    action.timestamp, action.agent_id,
-                )
-                self.graph.add_acted(action.agent_id, event_id, action.action_type, action.timestamp)
-
-                # ★ 动态事件写入 LanceDB (下一轮决策即可语义召回)
-                if self._preprocessor is not None:
-                    try:
-                        self._preprocessor.add_event_memory(
-                            content=action.content,
-                            agent_id=action.agent_id,
-                            round_number=round_number,
-                            event_type=action.action_type,
-                        )
-                    except Exception as e:
-                        logger.warning("[Simulator] Event memory write failed for %s: %s",
-                                     action.agent_id, e)
-
-        return sim_round
-
-    async def _agent_decide(
-        self, client: Any, agent: DeductionAgentProfile, round_number: int
-    ) -> SimulationAction | None:
-        # ── 近期事件 (最近 5 条) ──
-        recent = self._event_history[-5:]
-        recent_text = "\n".join(
-            f"- [{e.get('round', '?')}] {e.get('agent_name', e.get('agent', '?'))}: "
-            f"{e.get('content', '')[:80]}"
-            for e in recent
-        ) or "无近期事件"
-
-        # ── Path A: 静态原著背景检索 ──
-        static_text = "无特定背景"
-        if self._preprocessor and self._preprocessor.result:
-            try:
-                static_frags = await asyncio.to_thread(
-                    self._preprocessor.retrieve_for_entity,
-                    agent.name, config.deduction_retrieve_top_k,
-                    must_contain={agent.name} if agent.name else None,
-                )
-                if static_frags:
-                    static_text = "\n---\n".join(f[:300] for f in static_frags)
-            except Exception as e:
-                logger.warning("[Simulator] Static recall failed for %s: %s", agent.name, e)
-
-        # ── Path B: 动态模拟事件检索 ──
-        dynamic_text = "无近期模拟事件"
-        if self._persist_events and self._preprocessor is not None:
-            try:
-                from literarycreation.core.config import config
-                aliases: set[str] = set()
-                if self._preprocessor.result:
-                    aliases = self._preprocessor.result.high_freq_entities.get(agent.name, set())
-                    aliases.update(
-                        self._preprocessor.result.low_freq_entities.get(agent.name, set()))
-                query = agent.name + " " + " ".join(aliases - {agent.name})
-                dynamic_frags = await asyncio.to_thread(
-                    self._preprocessor.retrieve_dynamic_events,
-                    query, config.deduction_retrieve_top_k, min_similarity=config.deduction_similarity_threshold,
-                )
-                if dynamic_frags:
-                    dynamic_text = "\n---\n".join(dynamic_frags)
-            except Exception as e:
-                logger.warning("[Simulator] Dynamic recall failed for %s: %s", agent.name, e)
-        elif not self._persist_events:
-            # 隔离模式(蒙特卡洛): 仅用内存事件历史, 不触碰 LanceDB
-            mem = [e for e in self._event_history[-20:]
-                   if agent.name in e.get("content", "") or e.get("agent") == agent.entity_id]
-            if mem:
-                dynamic_text = "\n".join(f"- {e.get('content', '')[:80]}" for e in mem[-3:])
-
-        # ── Strategic Reasoning (primary path) ──
-        world = {"recent_events": recent_text, "static_knowledge": static_text,
-                  "dynamic_memory": dynamic_text,
-                  "relationship_context": self._rel_context.get(agent.entity_id, {}).get("summary", "")}
-        try:
-            decision = await self.reasoner.reason(agent, world, round_number, client=client)
-            sel = decision.get("selected", {})
-            action_data = {"action": sel.get("action", "observe"),
-                           "target": sel.get("target", ""),
-                           "content": sel.get("content", f"{agent.name}观察着周围环境")}
-            # Update trust matrix from selected action
-            if sel.get("target"):
-                self.reasoner.record_interaction(
-                    agent.entity_id, sel["target"], action_data["action"], action_data["content"])
-        except Exception as e:
-            logger.warning("[Simulator] Reasoner failed for %s, using inline prompt: %s", agent.name, e)
-            # ── Fallback: inline prompt ──
-            from literarycreation.core.llm_client import Message
-            system = "你是推演模拟中的角色，根据角色设定和历史事件做出合理的下一步行动。只输出 JSON。"
-            messages = [Message(role="user", content=Template(_ACTION_PROMPT).substitute(
-                persona=agent.persona, background=agent.background,
-                goals=", ".join(agent.goals) if agent.goals else "参与互动",
-                round_number=round_number, recent_events=recent_text,
-                static_knowledge=static_text, dynamic_memory=dynamic_text,
-            ))]
-            try:
-                if self._chat_fn is not None:
-                    response = await asyncio.to_thread(self._chat_fn, messages, system, 0.7)
-                    content = response
-                else:
-                    response = await client.chat(messages, system=system, temperature=0.7)
-                    content = extract_text(response)
-                action_data = _parse_action_json(content)
-            except Exception as e2:
-                logger.warning("[Deduction] Agent %s decision failed: %s", agent.name, e2)
-                return None
-
-        from datetime import datetime
-        return SimulationAction(
-            agent_id=agent.entity_id,
-            action_type=action_data.get("action", "observe"),
-            target_id=action_data.get("target", ""),
-            content=action_data.get("content", f"{agent.name}观察着周围环境"),
-            timestamp=datetime.now().isoformat(),
-        )
-
-    # ── 量化模式：决策 → 快照交互解算 → 批量应用 → 阈值淘汰 → 可选解读 ──
-    async def _run_round_quantified(self, round_number: int) -> SimulationRound:
-        from datetime import datetime
-
-        from literarycreation.core.llm_client import DeductionLLMClient as LLMClient
-
-        sim_round = SimulationRound(round_number=round_number)
-        re_engine = self._rule_engine
-        states = self._states
         client = LLMClient()
+        sim_round = SimulationRound(round_number=round_number)
 
-        alive_agents = [a for a in self.agents
-                        if a.entity_id in states and re_engine.is_alive(states[a.entity_id])]
-        alive_ids = [a.entity_id for a in alive_agents]
-        if not alive_agents:
+        # 1. Get scheduled events for this round
+        scheduler = self._scheduler
+        if scheduler is None:
             return sim_round
+        events = scheduler.get_events_for_round(round_number)
+        mandate_text = scheduler.get_mandate_text(round_number)
+        correction_level = scheduler.check_correction(round_number, self._states)
 
-        ordered = list(alive_agents)
-        self._rng.shuffle(ordered)
+        if mandate_text:
+            self._log("simulation", f"第{round_number}轮蓝图事件: {mandate_text[:80]}...")
 
-        recent = "\n".join(
-            f"- [{e.get('round','?')}] {e.get('agent_name','?')}: {e.get('content','')[:80]}"
-            for e in self._event_history[-5:]
-        ) or "（无近期事件）"
-
-        # Pre-build O(1) entity-id→index map for spatial lookups
-        def others_ctx(self_id: str) -> str:
-            if len(alive_agents) > 30:
-                return _build_summary_ctx(self_id, alive_agents, states, re_engine)
-            lines = []
-            for a in alive_agents:
-                if a.entity_id == self_id:
-                    continue
-                st = states[a.entity_id]
-                line = st.to_prompt_context()
-                hist = getattr(st, "history", []) or []
-                if len(hist) >= 6:
-                    trend_parts = []
-                    by_round: dict[int, dict[str, float]] = {}
-                    for entry in hist:
-                        if isinstance(entry, dict):
-                            r = entry.get("round", 0)
-                            metric = entry.get("metric", "")
-                            val = entry.get("new", entry.get("value", 0))
-                            if r and metric:
-                                by_round.setdefault(r, {})[metric] = float(val)
-                    rounds = sorted(by_round.keys())
-                    if len(rounds) >= 2:
-                        first, last = by_round[rounds[0]], by_round[rounds[-1]]
-                        for metric in re_engine.metrics():
-                            v0, v1 = first.get(metric, 0), last.get(metric, 0)
-                            if v0 > 0 and abs(v1 - v0) > 3.0:
-                                symbol = "↑" if v1 > v0 else "↓"
-                                trend_parts.append(f"{metric}{symbol}{abs(v1-v0):.0f}")
-                    if trend_parts:
-                        line += f"  多轮趋势: {', '.join(trend_parts)}"
-                lines.append(line)
-            return "\n".join(lines) or "（无其他参与方）"
-
-        def _build_summary_ctx(self_id, alive_agents, states, re_engine):
-            """N>30: show global metric averages for scalable context."""
-            import numpy as _np
-            ml = []
-            metrics_list = re_engine.metrics()
-            arr_list = []
-            for a in alive_agents:
-                if a.entity_id == self_id:
-                    continue
-                st = states[a.entity_id]
-                arr_list.append([float(st.metrics.get(m, 0)) for m in metrics_list])
-            if arr_list:
-                arr = _np.array(arr_list, dtype=_np.float64)
-                avgs = _np.mean(arr, axis=0)
-                mins = _np.min(arr, axis=0)
-                maxs = _np.max(arr, axis=0)
-                parts = []
-                for i, m in enumerate(metrics_list):
-                    parts.append(f"{m}: avg={avgs[i]:.0f} [{mins[i]:.0f}-{maxs[i]:.0f}]")
-                ml.append("全局统计: " + ", ".join(parts))
-            return "\n".join(ml) if ml else "（无其他参与方）"
-
-        def env_context() -> str:
-            """Build terrain/weather description for the LLM prompt."""
-            parts = []
-            if self._env:
-                weather = self._env.get("weather", "").strip()
-                terrain = self._env.get("terrain", "").strip()
-                if weather:
-                    parts.append(f"天气: {weather}")
-                if terrain:
-                    parts.append(f"地形: {terrain}")
-            if parts:
-                return "； ".join(parts)
-            return ""
-
-        def env_context() -> str:
-        sem = asyncio.Semaphore(self._max_concurrent)
-
-        # Clear round-level caches at start of round
-        if self._preprocessor is not None and hasattr(self._preprocessor, "clear_round_cache"):
-            self._preprocessor.clear_round_cache()
-
-        async def _recall(agent: DeductionAgentProfile) -> tuple[str, str]:
-            """量化轮的 LanceDB 语义召回：Path A 原著静态(只读，优化器也启用) + Path B 动态事件。"""
-            static_text, dynamic_text = "", ""
-            pp = self._preprocessor
-            if pp is not None and getattr(pp, "result", None):
-                try:
-                    frags = await asyncio.to_thread(
-                        pp.retrieve_for_entity, agent.name, _cfg.deduction_retrieve_top_k,
-                        {agent.name} if agent.name else None)
-                    if frags:
-                        static_text = "\n---\n".join(f[:300] for f in frags)
-                except Exception as e:
-                    logger.debug("[Simulator] 量化静态召回失败 %s: %s", agent.name, e)
-            if self._persist_events and pp is not None:
-                try:
-                    aliases: set[str] = set()
-                    if pp.result:
-                        aliases = set(pp.result.high_freq_entities.get(agent.name, set()))
-                        aliases.update(pp.result.low_freq_entities.get(agent.name, set()))
-                    query = (agent.name + " " + " ".join(aliases - {agent.name})).strip()
-                    frags = await asyncio.to_thread(
-                        pp.retrieve_dynamic_events, query, _cfg.deduction_retrieve_top_k,
-                        _cfg.deduction_similarity_threshold)
-                    if frags:
-                        dynamic_text = "\n---\n".join(frags)
-                except Exception as e:
-                    logger.debug("[Simulator] 量化动态召回失败 %s: %s", agent.name, e)
-            elif not self._persist_events:
-                # 隔离模式(蒙特卡洛)：仅用内存事件历史，不触碰 LanceDB 动态表
-                mem = [e for e in self._event_history[-20:]
-                       if agent.name in e.get("content", "") or e.get("agent") == agent.entity_id]
-                if mem:
-                    dynamic_text = "\n".join(f"- {e.get('content', '')[:80]}" for e in mem[-3:])
-            return static_text, dynamic_text
-
-        # Pre-compute per-agent contexts once before concurrent execution
-        _other_ctxs = {a.entity_id: others_ctx(a.entity_id) for a in alive_agents}
-        _env_ctx = env_context()
-        # ── Causal feedback: per-agent last round outcomes ──
-        _causal_ctxs = {
-            a.entity_id: "\n".join(getattr(self, "_last_round_outcomes", {}).get(a.entity_id, []))
-            for a in alive_agents
-        }
-
-        async def decide(agent: DeductionAgentProfile) -> dict[str, Any]:
-            async with sem:
-                static_text, dynamic_text = await _recall(agent)
-                rel_ctx = self._rel_context.get(agent.entity_id, {}).get("summary", "")
-                causal = _causal_ctxs.get(agent.entity_id, "")
-                if causal:
-                    rel_ctx = f"上一轮行动效果: {causal}\n{rel_ctx}" if rel_ctx else f"上一轮行动效果: {causal}"
-                # ── 提纲门控：本轮必须推动的事件（硬门控）+ 弧光纠偏（软门控）──
-                if self._round_mandate:
-                    rel_ctx = f"[本轮必须推动的剧情] {self._round_mandate}\n{rel_ctx}"
-                if self._last_outline_nudges:
-                    hint = "；".join(
-                        f"{n['name']}应{n['direction']}{n['metric']}"
-                        for n in self._last_outline_nudges
-                    )
-                    if hint:
-                        rel_ctx = f"[剧情走向纠偏] {hint}\n{rel_ctx}"
-                d = await self.reasoner.reason_quantified(
-                    agent, states[agent.entity_id], re_engine,
-                    recent_events=recent, other_context=_other_ctxs.get(agent.entity_id, ""),
-                    round_number=round_number, client=client,
-                    static_knowledge=static_text, dynamic_memory=dynamic_text,
-                    relationship_context=rel_ctx,
-                    spatial_context="",
-                    env_context=_env_ctx,
-                )
-                d["actor_id"] = agent.entity_id
-                return d
-
-        if self._cancel is not None and self._cancel.is_set():
-            return sim_round
-        # ── 提纲事件门控：计算本轮必须推动的关键事件（含追赶窗口）──
-        self._round_mandate = ""
-        if self._outline and self._outline.get("key_events"):
-            win = int(self._rule_engine.pack.get("modules", {})
-                      .get("outline_control", {}).get("catch_up_window", 0)) \
-                if self._rule_engine is not None else 0
-            mandated = [str(e.get("event", "")) for e in self._outline["key_events"]
-                        if e.get("event") and (round_number - win) <= int(e.get("round", 0)) <= round_number]
-            self._round_mandate = "；".join(m for m in mandated if m)
-        # 逐代理决策（逐个等待，确保取消信号在代理之间能被及时检测）
-        # ── FSM 分流：上一轮的 FSM 状态决定本轮哪些代理走 LLM ──
-        fsm_states = getattr(self, "_last_fsm_states", None)
-        fsm_actions = getattr(self, "_last_fsm_actions", None)
-        fsm_command = getattr(self, "_last_fsm_command_states", {"combat"})
+        # 2. Process each agent
+        alive_agents = [a for a in self.agents if not hasattr(a, 'dead') or not a.dead]
         decisions: list[dict[str, Any]] = []
 
-        for i, agent in enumerate(ordered):
+        for agent in alive_agents:
             if self._cancel is not None and self._cancel.is_set():
-                self._log("simulation", f"取消信号：已处理 {i}/{len(ordered)} 代理后停止")
-                return sim_round
-            # ── 用户强制 override：最高优先，跳过 FSM 与 LLM ──
+                raise _PhaseCancelledError()
+
             ov = self._pop_override(agent)
             if ov is not None:
                 ov["actor_id"] = agent.entity_id
                 ov["driver"] = "forced"
                 decisions.append(ov)
-                self._log("simulation", f"[用户强制] {agent.name} → {ov.get('action_type')}")
                 continue
-            # Check if FSM should drive this agent
-            state = fsm_states[i] if fsm_states is not None and i < len(fsm_states) else None
-            if state is not None and state not in fsm_command:
-                # FSM deterministic action — skip LLM
-                act = None
-                if fsm_actions is not None and i < len(fsm_actions) and fsm_actions[i]:
-                    act = dict(fsm_actions[i])
-                if act is None:
-                    act = {"action_type": "observe", "intensity": 0.3, "target": ""}
-                # 数据差异化描述：结合当前指标最危险项，避免"[FSM] observe"千篇一律
-                act["rationale"] = self._describe_fsm_action(agent, state, act.get("action_type", "observe"))
-                act["driver"] = "fsm"
-                act["actor_id"] = agent.entity_id
-                decisions.append(act)
-                continue
-            # LLM decision for command-state agents
-            raw = await decide(agent)
-            if isinstance(raw, BaseException):
-                self._log("simulation", f"agent {agent.name} 决策失败: {raw}")
-            else:
-                decisions.append(raw)
-        # raw_results kept below for backward compat
-        raw_results = decisions
 
-        # ── 轮前：自动效应（条件触发，逐实体结算）+ 延迟效应到期结算 ──
+            # Build context
+            st = self._states.get(agent.entity_id)
+            if st is None:
+                continue
+            rel_ctx = self._rel_context.get(agent.entity_id, {}).get("summary", "")
+            others = self._build_others_ctx(agent.entity_id, alive_agents)
+            dyn, static = await self._retrieve_memory(agent, round_number)
+            recent = "\n".join(
+                f"- [{e.get('round','?')}] {e.get('agent_name','?')}: {e.get('content','')[:80]}"
+                for e in self._event_history[-5:]
+            ) or "（无近期事件）"
+
+            dec = await self.reasoner.reason_narrative(
+                agent=agent, round_number=round_number, state=st,
+                event_mandate=mandate_text,
+                correction_level=correction_level,
+                other_context=others,
+                relationship_context=rel_ctx,
+                static_knowledge=static,
+                dynamic_memory=dyn,
+                recent_events=recent,
+                env_context=self._env_context(),
+                cached_action_catalog=self._cached_action_catalog(),
+            )
+            if dec:
+                dec["actor_id"] = agent.entity_id
+                dec["driver"] = "blueline"
+            else:
+                dec = {"actor_id": agent.entity_id, "action_type": "observe", "intensity": 0.3,
+                       "target": "", "rationale": "[蓝图模式] 默认观察", "driver": "blueline"}
+            decisions.append(dec)
+
+        # 3. Apply effects via rule engine
+        return await self._apply_decisions(round_number, decisions, client, sim_round, ordered)
+
+    # ── Mode A: Freeform writing ──
+
+    async def _run_round_freeform(self, round_number: int) -> SimulationRound:
+        from literarycreation.core.llm_client import DeductionLLMClient as LLMClient
+        re_engine = self._rule_engine
+
+        ordered = list(self.agents)
+        self._rng.shuffle(ordered)
+        client = LLMClient()
+        sim_round = SimulationRound(round_number=round_number)
+
+        # Build mandate if outline exists (advisory only in freeform mode)
+        self._round_mandate = ""
+        if self._scheduler is not None:
+            mandate_text = self._scheduler.get_mandate_text(round_number)
+            soft_text = self._scheduler.get_soft_goals_text(round_number)
+            parts = []
+            if mandate_text:
+                parts.append(f"[蓝图参考] {mandate_text}")
+            if soft_text:
+                parts.append(f"[剧情建议] {soft_text}")
+            self._round_mandate = "；".join(parts)
+
+        alive_agents = [a for a in self.agents if not hasattr(a, 'dead') or not a.dead]
+        decisions: list[dict[str, Any]] = []
+
+        for agent in alive_agents:
+            if self._cancel is not None and self._cancel.is_set():
+                raise _PhaseCancelledError()
+
+            ov = self._pop_override(agent)
+            if ov is not None:
+                ov["actor_id"] = agent.entity_id
+                ov["driver"] = "forced"
+                decisions.append(ov)
+                continue
+
+            st = self._states.get(agent.entity_id)
+            if st is None:
+                continue
+            rel_ctx = self._rel_context.get(agent.entity_id, {}).get("summary", "")
+            others = self._build_others_ctx(agent.entity_id, alive_agents)
+            dyn, static = await self._retrieve_memory(agent, round_number)
+            recent = "\n".join(
+                f"- [{e.get('round','?')}] {e.get('agent_name','?')}: {e.get('content','')[:80]}"
+                for e in self._event_history[-5:]
+            ) or "（无近期事件）"
+
+            dec = await self.reasoner.reason_quantified(
+                agent=agent, round_number=round_number, state=st,
+                other_context=others,
+                relationship_context=rel_ctx,
+                static_knowledge=static,
+                dynamic_memory=dyn,
+                recent_events=recent,
+                spatial_context="",
+                env_context=self._env_context(),
+                cached_action_catalog=self._cached_action_catalog(),
+                enable_multi_action=self._enable_multi_action,
+            )
+            if dec:
+                dec["actor_id"] = agent.entity_id
+                dec["driver"] = "freeform"
+            else:
+                dec = {"actor_id": agent.entity_id, "action_type": "observe", "intensity": 0.3,
+                       "target": "", "rationale": "默认观察", "driver": "freeform"}
+            decisions.append(dec)
+
+        return await self._apply_decisions(round_number, decisions, client, sim_round, ordered)
+
+    # ── Shared: apply rule engine effects ──
+
+    async def _apply_decisions(
+        self, round_number: int, decisions: list[dict], client: Any,
+        sim_round: SimulationRound, ordered: list,
+    ) -> SimulationRound:
+        re_engine = self._rule_engine
+
+        # Auto effects
         ranges = re_engine.ranges()
-        auto_deltas = re_engine.evaluate_auto_effects(states)
+        auto_deltas = re_engine.evaluate_auto_effects(self._states)
         for eid, d in auto_deltas.items():
-            if eid in states:
-                states[eid].apply_deltas(d, round_number, ranges)
-        for eid, st in states.items():
+            if eid in self._states:
+                self._states[eid].apply_deltas(d, round_number, ranges)
+
+        # Delay effects
+        for eid, st in self._states.items():
             delay_d = st.resolve_delays(round_number)
             if delay_d:
                 st.apply_deltas(delay_d, round_number, ranges)
 
-        # 轮初快照(批量应用语义) + 交互解算（收集逐交互归因，供因果链硬档写入）
+        # Resolve interactions
         deltas, interactions = re_engine.resolve_round(
-            states, decisions, self._name_to_id, self._env, collect_interactions=True)
-        inter_by_actor: dict[str, list[dict[str, Any]]] = {}
-        for _it in interactions:
-            bucket = inter_by_actor.get(_it["actor"])
-            if bucket is None:
-                inter_by_actor[_it["actor"]] = [_it]
-            else:
-                bucket.append(_it)
-        # Bulk JIT delta application for large entity counts
-        if len(states) >= 20:
-            _bulk_apply_deltas(states, deltas, ranges, re_engine.metrics())
+            self._states, decisions, self._name_to_id, self._env, collect_interactions=True)
+
+        # Bulk JIT delta application
+        if len(self._states) >= 20:
+            _bulk_apply_deltas(self._states, deltas, ranges, re_engine.metrics())
         else:
             for eid, d in deltas.items():
-                if eid in states:
-                    states[eid].apply_deltas(d, round_number, ranges)
+                if eid in self._states:
+                    self._states[eid].apply_deltas(d, round_number, ranges)
 
-        # ── 轮后：调度延迟效应 + 保存因果反馈 ──
+        # Build outcomes
         self._last_round_outcomes: dict[str, list[dict]] = {}
         for dec in decisions:
             actor = dec.get("actor_id")
-            if actor not in states:
+            if actor not in self._states:
                 continue
-            # Causal feedback for next round
             my_deltas = deltas.get(actor, {})
             if my_deltas:
                 summary = ", ".join(f"{k}{v:+.1f}" for k, v in my_deltas.items())
@@ -693,147 +408,192 @@ class SimulationEngine:
                     f"你的 {action} 对 {target_name} 造成: {summary}" if target else
                     f"你的 {action} 自身效应: {summary}"
                 )
-            # Delay effect scheduling
+
+        # Schedule delay effects
+        for dec in decisions:
             for action, sub_intensity, _target in re_engine._iter_subactions(dec):
                 delay_cfg = re_engine.pack.get("delay_effects", {}).get(action)
                 if delay_cfg and sub_intensity > 0:
                     dr = int(delay_cfg.get("delay", 1))
                     eff = {k: v * sub_intensity for k, v in delay_cfg.get("effects", {}).items()}
-                    states[actor].schedule_delays(round_number, dr, eff)
+                    self._states[dec["actor_id"]].schedule_delays(round_number, dr, eff)
 
-        # ── Algorithm module chain (outline_control + FSM + pacing + consistency + conflict) ──
-        if self._algorithm_modules and self._rule_engine is not None:
-            from literarycreation.algorithms.module_utils import (
-                apply_context_results,
-                build_context,
-            )
-            entity_ids = [a.entity_id for a in self.agents if a.entity_id in states]
-            ctx = build_context(states, self._rule_engine, entity_ids, round_number)
-            id_to_name = {a.entity_id: a.name for a in self.agents}
-            ctx.metadata["entity_ids"] = entity_ids
-            ctx.metadata["entity_names"] = [id_to_name.get(eid, eid) for eid in entity_ids]
-            for mod in self._algorithm_modules:
-                try:
-                    ctx = mod.execute(ctx)
-                except Exception as e:
-                    self._log("simulation", f"模块 {mod.name} 执行异常: {e}")
-            apply_context_results(ctx, states, entity_ids, self._rule_engine)
-            # Save FSM state for next round's agent decision split
-            if "fsm.agent_states" in ctx.metadata:
-                self._last_fsm_states = list(ctx.metadata["fsm.agent_states"])
-                self._last_fsm_actions = list(ctx.metadata.get("fsm.agent_actions", []))
-                self._last_fsm_command_states = set(
-                    ctx.metadata.get("fsm.command_states", ["crisis"])
-                )
-            # ── 提纲弧光纠偏：消费 nudges，注入下一轮软提示 + 高优先记忆 ──
-            nudges = ctx.metadata.get("outline.nudges") or []
-            self._last_outline_nudges = nudges
-            if nudges and self._persist_events and self._preprocessor is not None:
-                try:
-                    txt = "；".join(f"{n['name']}的{n['metric']}需{n['direction']}" for n in nudges)
-                    self._preprocessor.add_event_memory(
-                        content=f"[提纲纠偏] {txt}", agent_id="system_outline",
-                        round_number=round_number, event_type="immutable_goal", priority=0.9)
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("[Simulator] 提纲纠偏记忆写入失败: %s", e)
-
-        # 构造行动 + 内存事件历史
+        # Build SimulationRound actions
         for dec in decisions:
             actor = dec["actor_id"]
             agent = next((a for a in self.agents if a.entity_id == actor), None)
-            nm = agent.name if agent else actor[:8]
-            d_applied = deltas.get(actor, {})
-            delta_txt = ", ".join(f"{k}{v:+.1f}" for k, v in d_applied.items())
-            alloc = dec.get("actions") or None
-            alloc_txt = ""
-            if alloc:
-                alloc_txt = ", ".join(
-                    f"{a.get('action_type', '')}{float(a.get('weight', 0)):.2f}"
-                    + (f"→{a.get('target')}" if a.get("target") else "")
-                    for a in alloc
-                )
-                content = dec.get("rationale", "") or f"{nm} 资源分配: {alloc_txt}"
-            else:
-                content = dec.get("rationale", "") or f"{nm} 执行 {dec['action_type']}"
-            meta: dict[str, Any] = {
-                "intensity": dec.get("intensity", dec.get("budget", 0.5)),
-                "deltas": d_applied,
-                "metrics": dict(states[actor].metrics) if actor in states else {},
-            }
-            if alloc:
-                meta["budget"] = dec.get("budget", dec.get("intensity", 0.5))
-                meta["allocation"] = alloc
+            name = agent.name if agent else actor[:8]
+            content = dec.get("rationale", dec.get("content", ""))[:200]
             sim_round.actions.append(SimulationAction(
-                agent_id=actor, action_type=dec["action_type"],
-                target_id=dec.get("target", ""), content=content,
-                timestamp=datetime.now().isoformat(),
-                metadata=meta,
+                agent_id=actor,
+                action_type=dec.get("action_type", "observe"),
+                content=content,
+                driver=dec.get("driver", "freeform"),
             ))
-            # W4: 量化轮事件写入 LanceDB 动态表(仅主推演 persist_events=True；优化器隔离不写)
-            if self._persist_events and self._preprocessor is not None:
-                try:
-                    self._preprocessor.add_event_memory(
-                        content=content, agent_id=actor,
-                        round_number=round_number,
-                        event_type=dec["action_type"], priority=0.5)
-                except Exception as e:
-                    logger.debug("[Simulator] 量化事件写入 LanceDB 失败: %s", e)
-            # B+因果链: 量化轮写 Event 节点 + ACTED 边 + TARGETS/CAUSED(确定性数值归因)
-            # 仅主推演 persist_events=True；优化器隔离不写。
-            if self._persist_events and self.graph is not None:
-                try:
-                    _ts = datetime.now().isoformat()
-                    _eid = f"evt-{uuid.uuid4().hex[:8]}"
-                    _inters = inter_by_actor.get(actor, [])
-                    _primary_tid = _inters[0]["target"] if _inters else ""
-                    self.graph.add_event(_eid, content[:200], dec["action_type"], _ts, actor,
-                                         round_number=round_number, target_id=_primary_tid,
-                                         effect=delta_txt, driver=dec.get("driver", "llm"))
-                    self.graph.add_acted(actor, _eid, dec["action_type"], _ts)
-                    _seen_targets: set[str] = set()
-                    for _it in _inters:
-                        _tid = _it["target"]
-                        if _tid not in _seen_targets:
-                            self.graph.add_targets(_eid, _tid)
-                            _seen_targets.add(_tid)
-                        for _metric, _amount in _it["deltas"].items():
-                            self.graph.add_caused(_eid, _tid, _metric, float(_amount))
-                except Exception as e:
-                    logger.debug("[Simulator] 量化因果写入 Kuzu 失败: %s", e)
-            evt_suffix = (f"［{alloc_txt}］" if alloc_txt else "") + (f"（{delta_txt}）" if delta_txt else "")
             self._event_history.append({
-                "agent": actor, "agent_name": nm, "action": dec["action_type"],
-                "content": content + evt_suffix,
+                "agent": actor, "agent_name": name,
+                "action": dec.get("action_type", "?"), "content": content,
                 "round": round_number,
             })
+
         if len(self._event_history) > 200:
             self._event_history = self._event_history[-200:]
 
-        # 轮末快照(供报告/趋势) + 可选叙事解读
-        sim_round.state_delta["states"] = {
-            a.entity_id: {"name": a.name, "metrics": dict(states[a.entity_id].metrics),
-                          "alive": re_engine.is_alive(states[a.entity_id])}
-            for a in self.agents if a.entity_id in states
-        }
-        if self._enable_narrate:
-            try:
-                narration = await self._narrate_round(client, round_number, decisions, deltas)
-                if narration:
-                    sim_round.state_delta["narration"] = narration
-            except Exception as e:
-                logger.warning("[Simulator] 轮末叙事失败: %s", e)
+        # Persist
+        if self._persist_events:
+            for action in sim_round.actions:
+                event_id = f"evt-{uuid.uuid4().hex[:8]}"
+                self.graph.add_event(event_id, action.content[:200], action.action_type,
+                                     action.timestamp, action.agent_id)
+                self.graph.add_acted(action.agent_id, event_id, action.action_type, action.timestamp)
+                if self._preprocessor is not None:
+                    try:
+                        self._preprocessor.add_event_memory(
+                            content=action.content, agent_id=action.agent_id,
+                            round_number=round_number, event_type=action.action_type)
+                    except Exception as e:
+                        logger.warning("[Simulator] Event memory write failed for %s: %s",
+                                     action.agent_id, e)
 
-        # Build dashboard snapshot for frontend
-        sim_round.state_delta["snapshot"] = _build_state_snapshot(
-            states, re_engine.thresholds(), self._event_history, round_number, re_engine)
+        # Narration
+        if self._enable_narrate and hasattr(self, '_chat_fn'):
+            narration = await self._narrate_round(client, round_number, decisions, deltas)
+            sim_round.state_delta = {"narration": narration}
 
         return sim_round
+
+    # ── Non-quantified round ──
+
+    async def _run_nonquantified_round(self, round_number: int) -> SimulationRound:
+        from literarycreation.core.llm_client import DeductionLLMClient as LLMClient
+        sim_round = SimulationRound(round_number=round_number)
+        client = LLMClient()
+        ordered = list(self.agents)
+        self._rng.shuffle(ordered)
+        sem = asyncio.Semaphore(self._max_concurrent)
+
+        async def process_agent(agent: DeductionAgentProfile) -> SimulationAction | None:
+            async with sem:
+                return await self._agent_decide_nonquant(client, agent, round_number)
+
+        for agent in ordered:
+            if self._cancel is not None and self._cancel.is_set():
+                raise _PhaseCancelledError()
+            action = await process_agent(agent)
+            if action is not None:
+                sim_round.actions.append(action)
+                self._event_history.append({
+                    "agent": action.agent_id,
+                    "agent_name": getattr(next((a for a in self.agents if a.entity_id == action.agent_id), None), "name", action.agent_id[:8]),
+                    "action": action.action_type, "content": action.content,
+                    "round": round_number, "timestamp": action.timestamp,
+                })
+        if len(self._event_history) > 200:
+            self._event_history = self._event_history[-200:]
+        if self._persist_events:
+            for action in sim_round.actions:
+                event_id = f"evt-{uuid.uuid4().hex[:8]}"
+                self.graph.add_event(event_id, action.content[:200], action.action_type, action.timestamp, action.agent_id)
+                self.graph.add_acted(action.agent_id, event_id, action.action_type, action.timestamp)
+                if self._preprocessor is not None:
+                    try:
+                        self._preprocessor.add_event_memory(
+                            content=action.content, agent_id=action.agent_id,
+                            round_number=round_number, event_type=action.action_type)
+                    except Exception as e:
+                        logger.warning("[Simulator] Event memory write failed: %s", e)
+        return sim_round
+
+    async def _agent_decide_nonquant(self, client: Any, agent: DeductionAgentProfile, round_number: int) -> SimulationAction | None:
+        st = self._states.get(agent.entity_id) if self._states else None
+        st_ctx = st.to_prompt_context() if st else ""
+        dyn, static = await self._retrieve_memory(agent, round_number)
+        recent = "\n".join(
+            f"- [{e.get('round','?')}] {e.get('agent_name','?')}: {e.get('content','')[:80]}"
+            for e in self._event_history[-5:]
+        ) or "（无近期事件）"
+        prompt = Template(_ACTION_PROMPT).substitute(
+            persona=agent.persona or "无",
+            background=agent.background or "无",
+            goals="\n".join(f"- {g}" for g in agent.goals) if agent.goals else "无",
+            round_number=round_number,
+            dynamic_memory=dyn or "无",
+            static_knowledge=static or "无",
+            recent_events=recent,
+        )
+        if st_ctx:
+            prompt += f"\n\n## 当前量化状态\n{st_ctx}"
+        try:
+            from literarycreation.core.llm_client import Message
+            resp = await client.chat(
+                [Message(role="user", content=prompt)],
+                system="你是推演模拟中的角色，根据角色设定和历史事件做出合理的下一步行动。只输出 JSON。",
+                temperature=0.7,
+            )
+            raw = extract_text(resp)
+            parsed = _parse_action_json(raw)
+            if not parsed:
+                return None
+            return SimulationAction(
+                agent_id=agent.entity_id,
+                action_type=parsed.get("action", "observe"),
+                content=str(parsed.get("content", str(parsed)))[:300],
+            )
+        except Exception as e:
+            logger.warning(f"[Simulator] Non-quantified decide failed for {agent.name}: {e}")
+            return None
+
+    # ── Helpers ──
+
+    async def _retrieve_memory(self, agent: Any, round_number: int) -> tuple[str, str]:
+        dyn, static = "", ""
+        if self._preprocessor is not None:
+            query = getattr(agent, "persona", "") + " " + getattr(agent, "name", "")
+            try:
+                static = self._preprocessor.retrieve_for_entity(query, agent.entity_id, top_k=2)
+            except Exception:
+                pass
+            try:
+                dyn = self._preprocessor.retrieve_dynamic_events(query, top_k=3)
+            except Exception:
+                pass
+        return (dyn or "（无近期动态事件）"), (static or "（无原著参考）")
+
+    def _build_others_ctx(self, self_id: str, alive_agents: list) -> str:
+        lines = []
+        for a in alive_agents:
+            if a.entity_id == self_id:
+                continue
+            st = self._states.get(a.entity_id)
+            if st is None:
+                continue
+            line = st.to_prompt_context()
+            lines.append(line)
+        return "\n".join(lines) or "（无其他参与方）"
+
+    def _env_context(self) -> str:
+        if not self._env:
+            return ""
+        parts = []
+        weather = self._env.get("weather", "").strip()
+        terrain = self._env.get("terrain", "").strip()
+        if weather:
+            parts.append(f"天气: {weather}")
+        if terrain:
+            parts.append(f"地形: {terrain}")
+        return "； ".join(parts) if parts else ""
+
+    def _cached_action_catalog(self) -> str:
+        if not self._rule_engine:
+            return ""
+        actions = self._rule_engine.pack.get("actions", [])
+        if not actions:
+            return ""
+        return "、".join(actions)
 
     async def _narrate_round(self, client: Any, round_number: int,
                              decisions: list[dict], deltas: dict) -> str:
         from literarycreation.core.llm_client import Message
-
-        from ._utils import extract_text
         lines = []
         for dec in decisions:
             actor = dec["actor_id"]
@@ -841,20 +601,10 @@ class SimulationEngine:
             nm = agent.name if agent else actor[:8]
             d = deltas.get(actor, {})
             chg = ", ".join(f"{k}{v:+.1f}" for k, v in d.items()) or "无显著变化"
-            alloc = dec.get("actions") or None
-            if alloc:
-                budget = float(dec.get("budget", dec.get("intensity", 0.5)))
-                act_txt = "资源分配 " + ", ".join(
-                    f"{a.get('action_type', '')}{float(a.get('weight', 0)):.0%}"
-                    + (f"(→{a.get('target')})" if a.get("target") else "")
-                    for a in alloc
-                ) + f"，总投入{budget:.1f}"
-            else:
-                act_txt = (f"采取 {dec['action_type']}(强度{dec.get('intensity', 0.5):.1f}) "
-                           f"目标:{dec.get('target') or '—'}")
+            act_txt = f"采取 {dec['action_type']}(强度{dec.get('intensity', 0.5):.1f}) 目标:{dec.get('target') or '—'}"
             lines.append(f"{nm} {act_txt}，数值变化: {chg}")
         prompt = (
-            f"将第 {round_number} 轮量化推演结果改写为一段生动简洁的战局叙事（100 字以内）。\n\n"
+            f"将第 {round_number} 轮量化推演结果改写为一段生动简洁的叙事（100 字以内）。\n\n"
             "## 本轮各方行动与数值变化\n" + "\n".join(lines) + "\n\n只输出叙事段落，不要解释或列表。"
         )
         resp = await client.chat([Message(role="user", content=prompt)],
@@ -863,14 +613,10 @@ class SimulationEngine:
 
 
 def _bulk_apply_deltas(
-    states: dict[str, Any],
-    deltas: dict[str, dict[str, float]],
-    ranges: dict[str, Any],
-    metric_names: list[str],
+    states: dict[str, Any], deltas: dict[str, dict[str, float]],
+    ranges: dict[str, Any], metric_names: list[str],
 ) -> None:
-    """Bulk JIT delta application for large entity counts."""
     from literarycreation.engine._jit_utils import batch_apply_deltas
-
     entity_ids = list(states.keys())
     if not entity_ids:
         return
@@ -880,22 +626,18 @@ def _bulk_apply_deltas(
     deltas_arr = np.zeros((N, M), dtype=np.float64)
     lo_arr = np.full(M, -1e12, dtype=np.float64)
     hi_arr = np.full(M, 1e12, dtype=np.float64)
-
     for i, eid in enumerate(entity_ids):
         st = states[eid]
         for m, name in enumerate(metric_names):
             metrics_arr[i, m] = float(st.metrics.get(name, 0.0))
             d = deltas.get(eid, {}).get(name, 0.0)
             deltas_arr[i, m] = float(d) if d is not None else 0.0
-
     for m, name in enumerate(metric_names):
         rng = ranges.get(name, [0.0, 100.0])
         if rng and len(rng) >= 2:
             lo_arr[m] = float(rng[0])
             hi_arr[m] = float(rng[1])
-
     batch_apply_deltas(metrics_arr, deltas_arr, lo_arr, hi_arr)
-
     for i, eid in enumerate(entity_ids):
         st = states[eid]
         for m, name in enumerate(metric_names):
@@ -904,9 +646,7 @@ def _bulk_apply_deltas(
 
 def _build_state_snapshot(states: dict, thresholds: dict, event_history: list,
                           round_num: int, re_engine: Any) -> dict:
-    """Build structured snapshot for frontend dashboard panel (no LLM)."""
     metrics_list = re_engine.metrics() if re_engine else []
-    # Alerts: metrics within 20% of threshold
     alerts = []
     for st in states.values():
         if not hasattr(st, 'name'):
@@ -915,13 +655,9 @@ def _build_state_snapshot(states: dict, thresholds: dict, event_history: list,
             val = st.metrics.get(metric, 0)
             if val <= threshold * 1.2:
                 severity = "critical" if val <= threshold else "warning"
-                alerts.append({
-                    "entity": getattr(st, 'name', '?'),
-                    "metric": metric, "value": round(val, 1),
-                    "threshold": threshold, "severity": severity,
-                })
+                alerts.append({"entity": getattr(st, 'name', '?'), "metric": metric,
+                               "value": round(val, 1), "threshold": threshold, "severity": severity})
     alerts.sort(key=lambda a: a["value"] - a["threshold"])
-    # Group stats by domain
     groups = {}
     for st in states.values():
         domain = getattr(st, "domain", "generic")
@@ -932,19 +668,12 @@ def _build_state_snapshot(states: dict, thresholds: dict, event_history: list,
             groups[domain]["metrics"][m].append(st.metrics.get(m, 0))
     group_stats = {}
     for domain, data in groups.items():
-        group_stats[domain] = {
-            "count": len(data["names"]),
-            "metrics": {m: round(np.mean(vals), 1) for m, vals in data["metrics"].items() if vals},
-        }
-    # Recent events
+        group_stats[domain] = {"count": len(data["names"]),
+                               "metrics": {m: round(np.mean(vals), 1) for m, vals in data["metrics"].items() if vals}}
     recent = []
     for e in event_history[-3:]:
-        recent.append({
-            "agent": e.get("agent_name", "?"),
-            "action": e.get("action", ""),
-            "content": (e.get("content", "") or "")[:80],
-            "round": e.get("round", round_num),
-        })
+        recent.append({"agent": e.get("agent_name", "?"), "action": e.get("action", ""),
+                        "content": (e.get("content", "") or "")[:80], "round": e.get("round", round_num)})
     return {"alerts": alerts[:5], "groups": group_stats, "recent": recent,
             "round": round_num, "entity_count": len(states)}
 

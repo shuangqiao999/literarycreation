@@ -27,9 +27,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from literarycreation.engine.models import DeductionAgentProfile
 from literarycreation.engine.rule_engine import RuleEngine
 from literarycreation.engine.simulator import SimulationEngine
-from literarycreation.algorithms import ModuleContext
-from literarycreation.algorithms.fsm_module import FiniteStateMachineModule
-from literarycreation.algorithms.module_utils import build_module_chain
 from literarycreation.core.token_counter import (
     _current_session,
     _current_phase,
@@ -42,43 +39,6 @@ def banner(text: str) -> None:
     print(f"\n{'=' * 60}")
     print(f"  {text}")
     print(f"{'=' * 60}")
-
-
-# ── Test 1: FSM standalone ──
-def test_fsm():
-    banner("Test 1: FSM 角色状态追踪")
-    import numpy as np
-    ctx = ModuleContext(round_number=1)
-    ctx.arrays = {
-        "tension": np.array([80.0, 30.0], dtype=np.float64),
-        "affection": np.array([30.0, 75.0], dtype=np.float64),
-        "trust": np.array([40.0, 60.0], dtype=np.float64),
-    }
-
-    fsm = FiniteStateMachineModule()
-    fsm.configure({"default_state": "neutral", "command_states": ["crisis"], "transition_rules": [
-        {"from": "neutral", "to": "crisis", "condition": {"tension": [">", 70]}},
-        {"from": "neutral", "to": "intimate", "condition": {"affection": [">", 70], "trust": [">", 50]}},
-    ], "action_map": {"neutral": {"action_type": "observe", "intensity": 0.3}, "crisis": None, "intimate": {"action_type": "confess", "intensity": 0.7}}})
-    ctx = fsm.execute(ctx)
-    states = ctx.metadata["fsm.agent_states"]
-    assert states[0] == "crisis", f"char A should be crisis, got {states[0]}"
-    assert states[1] == "intimate", f"char B should be intimate, got {states[1]}"
-    print(f"  States: {states}")
-    print("  ✓ FSM passed")
-
-
-# ── Test 2: Module chain factory ──
-def test_module_chain():
-    banner("Test 2: 模块链工厂")
-    re = RuleEngine.from_domain("literary")
-    print(f"  领域: {re.pack['display_name']}")
-    print(f"  指标: {re.metrics()}")
-    modules = build_module_chain(re)
-    for m in modules:
-        print(f"  ✓ {m.name}: {m.description}")
-    assert len(modules) >= 3, f"Expected at least 3 modules, got {len(modules)}"
-    print("  ✓ Module chain built")
 
 
 # ── Test 3: Context variable propagation ──
@@ -152,7 +112,7 @@ async def test_full_round():
         print(f"    {st.to_prompt_context()}")
 
     # Build modules
-    modules = build_module_chain(re)
+    modules = []
     for m in modules:
         print(f"  模块: {m.name}")
 
@@ -206,8 +166,6 @@ async def main():
 
     failed = []
     for name, fn, is_async in [
-        ("FSM 角色状态追踪", test_fsm, False),
-        ("模块链工厂", test_module_chain, False),
         ("Token 上下文传播", test_context_vars, True),
         ("量化推演全流程", test_full_round, True),
     ]:
@@ -224,11 +182,12 @@ async def main():
 
     banner("结果")
     if failed:
-        print(f"  失败: {len(failed)}/4")
+        print(f"  失败: {len(failed)}/2")
+        for f in failed:
             print(f"    ✗ {f}")
         return 1
     else:
-        print(f"  全部 5 项通过 ✓")
+        print(f"  全部 2 项通过 ✓")
         return 0
 
 

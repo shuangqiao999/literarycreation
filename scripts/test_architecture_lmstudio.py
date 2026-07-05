@@ -22,7 +22,6 @@ sys.path.insert(0, os.path.join(_script, "..", "src"))
 from literarycreation.engine.rule_engine import RuleEngine
 from literarycreation.engine.models import DeductionAgentProfile, EntityState
 from literarycreation.engine.simulator import SimulationEngine
-from literarycreation.algorithms.module_utils import build_module_chain
 
 PASS = FAIL = 0
 def banner(t): print(f"\n{'='*65}\n  {t}\n{'='*65}")
@@ -63,7 +62,7 @@ async def test_trend_perception():
                 val = 80.0
             states["D1"].history.append({"round": rnd, "metric": m, "old": val+5, "delta": -5, "new": float(val)})
 
-    modules = build_module_chain(re)
+    modules = []
     engine = SimulationEngine(agents=agents, graph=None, total_rounds=5,
         log_fn=lambda p,m: None, rule_engine=re, states=states,
         enable_narrate=True, algorithm_modules=modules, persist_events=False)
@@ -95,7 +94,7 @@ async def test_causal_feedback():
     for a in agents:
         states[a.entity_id] = EntityState(id=a.entity_id, name=a.name, domain="military",
                                           metrics=dict(init_m), history=[])
-    modules = build_module_chain(re)
+    modules = []
     engine = SimulationEngine(agents=agents, graph=None, total_rounds=3,
         log_fn=lambda p,m: None, rule_engine=re, states=states,
         enable_narrate=True, algorithm_modules=modules, persist_events=False)
@@ -134,7 +133,7 @@ async def test_full_pipeline_5rounds():
         states[a.entity_id] = EntityState(id=a.entity_id, name=a.name, domain="military",
                                           metrics=dict(init_m), history=[])
 
-    modules = build_module_chain(re)
+    modules = []
     print(f"  模块: {[m.name for m in modules]}")
     print(f"  FSM规则: literary (角色状态转移)")
 
