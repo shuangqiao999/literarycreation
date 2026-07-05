@@ -134,7 +134,6 @@ class SimulationEngine:
         self._fsm_override_store: dict = fsm_override_store if fsm_override_store is not None else {}
         self._round_mandate: str = ""
         self._last_outline_nudges: list[dict[str, Any]] = []
-        self._spatial_state = None   # cached SpatialState, updated after each module run
         from literarycreation.core.config import config
 
         self._max_concurrent = (
@@ -445,24 +444,18 @@ class SimulationEngine:
         ) or "（无近期事件）"
 
         # Pre-build O(1) entity-id→index map for spatial lookups
-        alive_id_to_idx = {eid: i for i, eid in enumerate(alive_ids)} if alive_ids else {}
-
         def others_ctx(self_id: str) -> str:
             if len(alive_agents) > 30:
-                return _build_summary_ctx(self_id, alive_agents, states, alive_id_to_idx,
-                                          self._spatial_state, re_engine)
+                return _build_summary_ctx(self_id, alive_agents, states, re_engine)
             lines = []
-            idx_self = alive_id_to_idx.get(self_id)
             for a in alive_agents:
                 if a.entity_id == self_id:
                     continue
                 st = states[a.entity_id]
                 line = st.to_prompt_context()
-                # ── Trend perception: show multi-round metric deltas ──
                 hist = getattr(st, "history", []) or []
-                if len(hist) >= 6:  # at least 2 rounds with ~3 metrics each
+                if len(hist) >= 6:
                     trend_parts = []
-                    # Reconstruct per-round metric values from history entries
                     by_round: dict[int, dict[str, float]] = {}
                     for entry in hist:
                         if isinstance(entry, dict):
@@ -481,53 +474,22 @@ class SimulationEngine:
                                 trend_parts.append(f"{metric}{symbol}{abs(v1-v0):.0f}")
                     if trend_parts:
                         line += f"  多轮趋势: {', '.join(trend_parts)}"
-                if self._spatial_state is not None and idx_self is not None:
-                    sp = self._spatial_state
-                    idx_other = alive_id_to_idx.get(a.entity_id)
-                    if idx_other is not None and idx_self < len(sp.positions) and idx_other < len(sp.positions):
-                        dist = float(np.linalg.norm(sp.positions[idx_self] - sp.positions[idx_other]))
-                        line += f"  距离: {dist:.0f}m"
                 lines.append(line)
             return "\n".join(lines) or "（无其他参与方）"
 
-        def _build_summary_ctx(self_id, alive_agents, states, id_to_idx, spatial_state, re_engine):
-            """N>30: bucket entities by distance + show global averages. Keeps prompts O(1)."""
+        def _build_summary_ctx(self_id, alive_agents, states, re_engine):
+            """N>30: show global metric averages for scalable context."""
             import numpy as _np
             ml = []
-            idx_self = id_to_idx.get(self_id)
             metrics_list = re_engine.metrics()
-            buckets = {"close": [], "mid": [], "far": []}
+            arr_list = []
             for a in alive_agents:
-                if a.entity_id == self_id: continue
+                if a.entity_id == self_id:
+                    continue
                 st = states[a.entity_id]
-                dist = 9999.0
-                if spatial_state is not None and idx_self is not None:
-                    idx_other = id_to_idx.get(a.entity_id)
-                    if idx_other is not None and idx_self < len(spatial_state.positions) and idx_other < len(spatial_state.positions):
-                        dvec = spatial_state.positions[idx_self] - spatial_state.positions[idx_other]
-                        dist = float(_np.linalg.norm(dvec))
-                entry = {"name": st.name, "metrics": dict(st.metrics), "dist": dist}
-                if dist < 50: buckets["close"].append(entry)
-                elif dist < 200: buckets["mid"].append(entry)
-                else: buckets["far"].append(entry)
-            def _s(e, cnt):
-                m = e["metrics"]
-                kv = ", ".join(f"{k}={m.get(k,0):.0f}" for k in metrics_list[:cnt])
-                return f"{e['name']}({kv}, d={e['dist']:.0f}m)"
-            if buckets["close"]:
-                buckets["close"].sort(key=lambda e: e["dist"])
-                ml.append(f"邻近威胁（<50m, {len(buckets['close'])}个）:")
-                for e in buckets["close"][:8]: ml.append(f"  {_s(e, 4)}")
-            if buckets["mid"]:
-                buckets["mid"].sort(key=lambda e: e["dist"])
-                ml.append(f"中等距离（50-200m, {len(buckets['mid'])}个）:")
-                for e in buckets["mid"][:5]: ml.append(f"  {_s(e, 2)}")
-            fc = len(buckets["far"])
-            if fc > 0: ml.append(f"远处（>200m, {fc}个）")
-            all_m = [_np.array(list(states[e.entity_id].metrics.values()), dtype=_np.float64)
-                      for e in alive_agents if e.entity_id != self_id]
-            if all_m:
-                arr = _np.stack(all_m)
+                arr_list.append([float(st.metrics.get(m, 0)) for m in metrics_list])
+            if arr_list:
+                arr = _np.array(arr_list, dtype=_np.float64)
                 avgs = _np.mean(arr, axis=0)
                 mins = _np.min(arr, axis=0)
                 maxs = _np.max(arr, axis=0)
@@ -551,39 +513,7 @@ class SimulationEngine:
                 return "； ".join(parts)
             return ""
 
-        def spatial_self_ctx(self_id: str) -> str:
-            if self._spatial_state is None:
-                return ""
-            sp = self._spatial_state
-            idx = alive_id_to_idx.get(self_id)
-            if idx is None or idx >= len(sp.positions):
-                return ""
-            pos = sp.positions[idx]
-            dists: list[tuple[str, float]] = []
-            for i, a in enumerate(alive_agents):
-                if a.entity_id == self_id or i >= len(sp.positions):
-                    continue
-                d = float(np.linalg.norm(sp.positions[idx] - sp.positions[i]))
-                if d < 200:
-                    dists.append((a.name, d))
-            dists.sort(key=lambda x: x[1])
-            lines = [f"位置: ({pos[0]:.0f}, {pos[1]:.0f}, {pos[2]:.0f})"]
-            if dists:
-                lines.append("邻近实体: " + "; ".join(f"{n}({d:.0f}m)" for n, d in dists[:5]))
-            # Collision contact
-            in_contact = []
-            for i, a in enumerate(alive_agents):
-                if a.entity_id == self_id or i >= len(sp.positions):
-                    continue
-                d = float(np.linalg.norm(sp.positions[idx] - sp.positions[i]))
-                min_d = sp.radii[idx] + sp.radii[i] if i < len(sp.radii) else 10
-                if d < min_d:
-                    in_contact.append(a.name)
-            if in_contact:
-                lines.append("接触/碰撞中: " + "、".join(in_contact))
-            return "\n".join(lines)
-
-        from literarycreation.core.config import config as _cfg
+        def env_context() -> str:
         sem = asyncio.Semaphore(self._max_concurrent)
 
         # Clear round-level caches at start of round
@@ -627,7 +557,6 @@ class SimulationEngine:
 
         # Pre-compute per-agent contexts once before concurrent execution
         _other_ctxs = {a.entity_id: others_ctx(a.entity_id) for a in alive_agents}
-        _spatial_ctxs = {a.entity_id: spatial_self_ctx(a.entity_id) for a in alive_agents}
         _env_ctx = env_context()
         # ── Causal feedback: per-agent last round outcomes ──
         _causal_ctxs = {
@@ -658,7 +587,7 @@ class SimulationEngine:
                     round_number=round_number, client=client,
                     static_knowledge=static_text, dynamic_memory=dynamic_text,
                     relationship_context=rel_ctx,
-                    spatial_context=_spatial_ctxs.get(agent.entity_id, ""),
+                    spatial_context="",
                     env_context=_env_ctx,
                 )
                 d["actor_id"] = agent.entity_id
@@ -772,16 +701,14 @@ class SimulationEngine:
                     eff = {k: v * sub_intensity for k, v in delay_cfg.get("effects", {}).items()}
                     states[actor].schedule_delays(round_number, dr, eff)
 
-        # ── Algorithm module chain (ODE + Physics / 文学域: outline_control + FSM) ──
+        # ── Algorithm module chain (outline_control + FSM + pacing + consistency + conflict) ──
         if self._algorithm_modules and self._rule_engine is not None:
             from literarycreation.algorithms.module_utils import (
                 apply_context_results,
                 build_context,
             )
             entity_ids = [a.entity_id for a in self.agents if a.entity_id in states]
-            ctx = build_context(states, self._rule_engine, entity_ids, round_number,
-                                prev_spatial=getattr(self, "_spatial_state", None))
-            # 提纲弧光门控需要「数组序↔角色名」映射
+            ctx = build_context(states, self._rule_engine, entity_ids, round_number)
             id_to_name = {a.entity_id: a.name for a in self.agents}
             ctx.metadata["entity_ids"] = entity_ids
             ctx.metadata["entity_names"] = [id_to_name.get(eid, eid) for eid in entity_ids]
@@ -791,15 +718,12 @@ class SimulationEngine:
                 except Exception as e:
                     self._log("simulation", f"模块 {mod.name} 执行异常: {e}")
             apply_context_results(ctx, states, entity_ids, self._rule_engine)
-            # Cache spatial state for next round's decision prompts
-            if hasattr(ctx, "spatial"):
-                self._spatial_state = ctx.spatial
             # Save FSM state for next round's agent decision split
             if "fsm.agent_states" in ctx.metadata:
                 self._last_fsm_states = list(ctx.metadata["fsm.agent_states"])
                 self._last_fsm_actions = list(ctx.metadata.get("fsm.agent_actions", []))
                 self._last_fsm_command_states = set(
-                    ctx.metadata.get("fsm.command_states", ["combat"])
+                    ctx.metadata.get("fsm.command_states", ["crisis"])
                 )
             # ── 提纲弧光纠偏：消费 nudges，注入下一轮软提示 + 高优先记忆 ──
             nudges = ctx.metadata.get("outline.nudges") or []

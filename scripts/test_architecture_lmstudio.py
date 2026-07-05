@@ -112,43 +112,11 @@ async def test_causal_feedback():
                 check(f"反馈含动作描述 ({name})", "造成" in str(msg) or "效应" in str(msg), str(msg)[:80])
 
 
-# ── Test 3: Spatial FSM ──
-def test_spatial_fsm():
-    banner("Test 3: 空间FSM (distance_to_enemy)")
-
-    from literarycreation.algorithms.fsm_module import FiniteStateMachineModule
-    from literarycreation.algorithms import ModuleContext, SpatialState
-
-    ctx = ModuleContext(round_number=1)
-    ctx.spatial.init_from_dict(['e1','e2','e3'],
-        {'e1':[0,0,0],'e2':[45,0,0],'e3':[200,0,0]})
-    ctx.arrays = {'strength': [100.0, 80.0, 50.0]}
-    ctx.metadata['fsm.enemy_ids'] = [1, 2]
-
-    fsm = FiniteStateMachineModule()
-    fsm.configure({
-        'default_state': 'patrol',
-        'command_states': ['combat'],
-        'action_map': {'patrol': {'action_type':'maneuver','intensity':0.3}, 'combat': None},
-        'transition_rules': [
-            {'from': 'patrol', 'to': 'combat', 'condition': {'distance_to_enemy': ['<', 50]}},
-        ],
-    })
-    ctx2 = ModuleContext(round_number=1, spatial=ctx.spatial)
-    ctx2.arrays = {'dummy': [0.0, 0.0, 0.0]}
-    ctx2.metadata['fsm.enemy_ids'] = [1]  # only e1 considers e2 as enemy
-    fsm.execute(ctx2)
-    states = ctx2.metadata['fsm.agent_states']
-    check("e1触发距离条件→combat", states[0] == 'combat', f"state={states[0]} (distance to e2=10, <50)")
-    check("e2无敌人→stay patrol", states[1] == 'patrol', f"state={states[1]} (no enemy_ids for e2)")
-    check("e3无敌人→stay patrol", states[2] == 'patrol', f"state={states[2]}")
-
-
-# ── Test 4: Full 5-round pipeline with all 3 features ──
+# ── Test 3: Full 5-round pipeline with all 3 features ──
 async def test_full_pipeline_5rounds():
-    banner("Test 4: 全流程5轮推演 (趋势+因果+空间FSM)")
+    banner("Test 3: 全流程5轮推演 (趋势+因果+FSM)")
 
-    re = RuleEngine.from_domain("military")
+    re = RuleEngine.from_domain("literary")
     init_m = dict(re.pack.get("initial_metrics", {}))
     metrics = re.metrics()
 
@@ -168,7 +136,7 @@ async def test_full_pipeline_5rounds():
 
     modules = build_module_chain(re)
     print(f"  模块: {[m.name for m in modules]}")
-    print(f"  FSM规则: military (含distance_to_enemy)")
+    print(f"  FSM规则: literary (角色状态转移)")
 
     engine = SimulationEngine(agents=agents, graph=None, total_rounds=5,
         log_fn=lambda p,m: None, rule_engine=re, states=states,
@@ -240,10 +208,9 @@ async def main():
     PASS = FAIL = 0
 
     print("=" * 65)
-    print("  LiteraryCreation 架构改进验证: 趋势+因果+空间FSM (12b)")
+    print("  LiteraryCreation 架构改进验证: 趋势+因果+FSM (12b)")
     print("=" * 65)
 
-    test_spatial_fsm()
     await test_trend_perception()
     await test_causal_feedback()
     await test_full_pipeline_5rounds()

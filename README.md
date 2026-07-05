@@ -29,7 +29,7 @@ LiteraryCreation 是一款本地优先的多智能体文学创作工具：以「
 本体生成 → GraphRAG 人物关系图谱 → 角色人格工厂 → 并行推演 → 散文渲染，全程自动化。
 
 ### 文学量化引擎（内置 `literary` 规则包）
-以 6 个文学指标驱动角色演化：`trust`（信任）/`tension`（张力）/`affection`（情感）/`power`（权力）/`mystery`（悬念）/`fatigue`（疲惫）。角色动作（`confront`/`confess`/`ally`/`betray`/`investigate`/`protect`/`manipulate`/`observe`）映射为结构化数值效应，含条件效应、延迟效应、自动衰减与有限状态机（中立/危机/亲密/背叛）。规则包内置、开箱即用，无需配置。
+以 6 个文学指标驱动角色演化：`trust`（信任）/`tension`（张力）/`affection`（情感）/`power`（权力）/`mystery`（悬念）/`fatigue`（疲惫）。角色动作（`confront`/`confess`/`ally`/`betray`/`investigate`/`protect`/`manipulate`/`observe`）映射为结构化数值效应，含条件效应、延迟效应、自动衰减。5 个轻量算法模块：角色状态追踪（FSM）、提纲弧光门控、节奏分析、角色一致性检测、冲突递进追踪。规则包内置、开箱即用，无需配置。
 
 ### 散文/剧本渲染器
 Phase 5 将推演结果（角色最终状态 + 关键事件序列 + 原文风格参考）渲染为小说/剧本正文，含场景描写、人物对话、内心独白。支持叙事风格选择（现实主义 / 浪漫主义 / 悬疑 / 史诗 / 宫廷剧）。LLM 不可用时降级为结构化事件摘要，保证不中断。**支持一键导出为 UTF-8（含 BOM）`.txt`，Windows 记事本无乱码。**
@@ -67,7 +67,7 @@ Tauri 2 壳（系统托盘 + 自动拉起后端），React 18 前端含人物关
   - LanceDB — 向量/全文检索（`data/lancedb`）
   - `data/forge_config.json` — 端点与模型配置
 - **LLM 接入**：OpenAI 兼容接口，统一 Provider 注册表，内置 28+ 厂商目录；对话与嵌入端点可分别配置。解析优先级：`forge_config.json` > `FORGE_*` 环境变量 > 厂商默认。
-- **算法依赖**：`numpy` + `scipy`（文学域仅用离散规则引擎 + FSM，不加载 ODE/物理模块）。
+- **算法依赖**：`numpy`（文学域使用规则引擎 + 5 个轻量算法模块，无需 scipy）
 - **许可证**：AGPL-3.0-only
 
 > **数据隔离**：桌面版运行期数据写入 `%LOCALAPPDATA%\LiteraryCreation\data`，与 StrategyForge 互不干扰。环境变量沿用 `FORGE_` 前缀，兼容既有配置。
@@ -166,18 +166,24 @@ npx tauri dev      # 完整桌面应用（自动构建并联调）
   "conditional_effects": { "confess_risky": {"condition": "affection > 60 and trust > 40", "self_effects": {"affection": 25}} },
   "auto_effects": { "tension_decay": {"condition": "tension > 40", "effects": {"tension": -3, "trust": 1}} },
   "modules": {
-    "pipeline": { "order": ["outline_control", "finite_state_machine"] },
+    "pipeline": { "order": ["outline_control", "pacing_analyzer", "character_consistency", "conflict_progression", "finite_state_machine"] },
     "outline_control": { "deviation_threshold": 12.0, "catch_up_window": 2 },
+    "pacing_analyzer": { "stall_threshold": 3, "rush_threshold": 30.0, "plateau_rounds": 4 },
+    "character_consistency": { "warn_threshold": 0.7 },
+    "conflict_progression": { "climax_min_tension": 65.0, "early_drop_threshold": 30.0 },
     "finite_state_machine": { "default_state": "neutral", "command_states": ["crisis"], "...": "..." }
   }
 }
 ```
 
 - `thresholds` 置空：角色不因数值被自动"淘汰"，去留由剧情决定。
-- `outline_control`：Mode 2 弧光门控模块（`algorithms/outline_control.py`）。
+- `outline_control`：Mode 2 弧光门控模块。
+- `pacing_analyzer`：节奏分析（事件密度/指标变化速度）。
+- `character_consistency`：角色一致性检测（行为与指标矛盾标记）。
+- `conflict_progression`：冲突递进追踪（张力弧线验证）。
 - 无 ODE/物理模块：文学指标为离散演化。
 
-> 保留的 8 个战略领域规则包（军事/商业/政治/生态/城市/科技/信息战/地缘）仍在 `rules.json` 中，但前端锁定为文学叙事。
+> 保留的战略领域规则包（军事/商业/政治/生态/城市/科技/信息战/地缘）仍在 `rules.json` 中，但前端锁定为文学叙事。
 
 ---
 
@@ -227,7 +233,7 @@ npx tauri dev      # 完整桌面应用（自动构建并联调）
 ```
 literarycreation/
 ├── src/literarycreation/
-│   ├── algorithms/       # 通用算法模块（FSM / ODE / Physics / outline_control🆕 / 模块链工厂）
+│   ├── algorithms/       # 轻量写作辅助模块（FSM / 提纲门控 / 节奏分析 / 一致性 / 冲突递进 / 管线调度）
 │   ├── core/             # 配置 / Provider 注册表 / LLM 适配 / Token 统计 / 分块器
 │   ├── engine/           # 五阶段流水线 + 规则引擎 + 优化器 + prose_renderer🆕 + 预处理器 + 推理器
 │   ├── storage/          # SQLite 会话库 + Kuzu 图库

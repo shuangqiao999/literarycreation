@@ -28,8 +28,6 @@ from literarycreation.engine.rule_engine import RuleEngine
 from literarycreation.engine.simulator import SimulationEngine
 from literarycreation.engine.orchestrator import _PhaseCancelledError
 from literarycreation.algorithms.module_utils import build_module_chain
-from literarycreation.algorithms.ode_module import ODEModule
-from literarycreation.algorithms.physics_module import PhysicsModule
 
 
 def banner(text: str) -> None:
@@ -74,11 +72,6 @@ async def test_pause_resume():
         states[a.entity_id] = state
 
     # ── 构建算法模块链 ──
-    ode = ODEModule()
-    ode.configure({"sub_steps": 8, "equations": {"supply": "supply_consumption", "fatigue": "fatigue_recovery"}})
-    physics = PhysicsModule()
-    physics.configure({"enable_gravity": True, "enable_collision": True,
-                       "init_positions": {"strategy": "sphere", "radius": 50.0}})
     algo_modules = build_module_chain(re_engine)
     print(f"  算法模块: {len(algo_modules)} 个")
 

@@ -53,8 +53,11 @@ _FALLBACK_RULES: dict[str, dict[str, Any]] = {
             "trust_erosion": {"condition": "trust < 30", "effects": {"trust": -2, "tension": 3}},
         },
         "modules": {
-            "pipeline": {"order": ["outline_control", "finite_state_machine"], "conditionals": {}},
+            "pipeline": {"order": ["outline_control", "pacing_analyzer", "character_consistency", "conflict_progression", "finite_state_machine"], "conditionals": {}},
             "outline_control": {"deviation_threshold": 12.0, "catch_up_window": 2},
+            "pacing_analyzer": {"stall_threshold": 3, "rush_threshold": 30.0, "plateau_rounds": 4},
+            "character_consistency": {"warn_threshold": 0.7},
+            "conflict_progression": {"climax_min_tension": 65.0, "early_drop_threshold": 30.0},
             "finite_state_machine": {
                 "default_state": "neutral",
                 "command_states": ["crisis"],

@@ -1,10 +1,10 @@
-"""全流程算法模块测试 — 连接本地 LM Studio 9B 模型，验证 ODE/Physics 模块。
+"""全流程算法模块测试 — 连接本地 LM Studio 9B 模型，验证文学写作模块。
 
 验证项:
-  1. ODE 模块：supply/fatigue 连续平滑演化（非跳跃式）
-  2. Physics 模块：3D 坐标初始化 + 重力下落 + 碰撞分离  
+  1. FSM 模块：角色状态追踪  
+  2. 模块链工厂：pipeline 构建
   3. Token 统计：全程记录且数值 > 0
-  4. 量化推演：3 agent × 3 轮军事领域全流程
+  4. 量化推演：3 agent × 3 轮文学领域全流程
   5. 上下文变量传播：token_counter 成功捕获 sid/phase
 """
 from __future__ import annotations
@@ -27,9 +27,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from literarycreation.engine.models import DeductionAgentProfile
 from literarycreation.engine.rule_engine import RuleEngine
 from literarycreation.engine.simulator import SimulationEngine
-from literarycreation.algorithms import ModuleContext, SpatialState
-from literarycreation.algorithms.ode_module import ODEModule
-from literarycreation.algorithms.physics_module import PhysicsModule
+from literarycreation.algorithms import ModuleContext
+from literarycreation.algorithms.fsm_module import FiniteStateMachineModule
 from literarycreation.algorithms.module_utils import build_module_chain
 from literarycreation.core.token_counter import (
     _current_session,
@@ -45,86 +44,46 @@ def banner(text: str) -> None:
     print(f"{'=' * 60}")
 
 
-# ── Test 1: ODE standalone ──
-def test_ode():
-    banner("Test 1: ODE 连续演化")
-    ctx = ModuleContext(round_number=1, dt=1.0)
+# ── Test 1: FSM standalone ──
+def test_fsm():
+    banner("Test 1: FSM 角色状态追踪")
     import numpy as np
+    ctx = ModuleContext(round_number=1)
     ctx.arrays = {
-        "supply": np.array([85.0, 70.0, 50.0], dtype=np.float64),
-        "fatigue": np.array([10.0, 40.0, 80.0], dtype=np.float64),
-        "strength": np.array([100.0, 80.0, 60.0], dtype=np.float64),
+        "tension": np.array([80.0, 30.0], dtype=np.float64),
+        "affection": np.array([30.0, 75.0], dtype=np.float64),
+        "trust": np.array([40.0, 60.0], dtype=np.float64),
     }
-    ode = ODEModule()
-    ode.configure({"sub_steps": 8, "equations": {
-        "supply": "supply_consumption",
-        "fatigue": "fatigue_recovery",
-    }})
-    initial = {k: v.copy() for k, v in ctx.arrays.items()}
-    ctx = ode.execute(ctx)
 
-    # fatigue should decrease (recovery), supply should decrease (consumption)
-    for i, name in enumerate(["Agent A", "Agent B", "Agent C"]):
-        f0, f1 = initial["fatigue"][i], ctx.arrays["fatigue"][i]
-        s0, s1 = initial["supply"][i], ctx.arrays["supply"][i]
-        status_f = "OK" if f1 < f0 else "FAIL"
-        status_s = "OK" if s1 < s0 else "FAIL"
-        print(f"  {name}: fatigue {f0:.1f}→{f1:.1f} [{status_f}] supply {s0:.1f}→{s1:.1f} [{status_s}]")
-        assert f1 < f0, f"fatigue should decrease (recover) for {name}"
-        assert s1 < s0, f"supply should decrease for {name}"
-    print("  ✓ ODE passed")
+    fsm = FiniteStateMachineModule()
+    fsm.configure({"default_state": "neutral", "command_states": ["crisis"], "transition_rules": [
+        {"from": "neutral", "to": "crisis", "condition": {"tension": [">", 70]}},
+        {"from": "neutral", "to": "intimate", "condition": {"affection": [">", 70], "trust": [">", 50]}},
+    ], "action_map": {"neutral": {"action_type": "observe", "intensity": 0.3}, "crisis": None, "intimate": {"action_type": "confess", "intensity": 0.7}}})
+    ctx = fsm.execute(ctx)
+    states = ctx.metadata["fsm.agent_states"]
+    assert states[0] == "crisis", f"char A should be crisis, got {states[0]}"
+    assert states[1] == "intimate", f"char B should be intimate, got {states[1]}"
+    print(f"  States: {states}")
+    print("  ✓ FSM passed")
 
 
-# ── Test 2: Physics standalone ──
-def test_physics():
-    banner("Test 2: 3D 物理引擎")
-    ctx = ModuleContext(round_number=1, dt=0.1)
-    ctx.spatial = SpatialState()
-    ctx.spatial.init_from_dict(
-        ["e1", "e2", "e3"],
-        {"e1": [0, 0, 100], "e2": [4, 0, 100], "e3": [30, 0, 100]},
-        {"e1": [0, 0, -5], "e2": [0, 0, -3], "e3": [10, 0, -8]},
-        {"e1": 1.0, "e2": 0.5, "e3": 2.0},
-        {"e1": 5, "e2": 5, "e3": 10},
-    )
-    import numpy as np
-    ctx.arrays = {"strength": np.array([100, 80, 50], dtype=np.float64)}
-
-    phys = PhysicsModule()
-    phys.configure({"subsystems": ["dynamics", "collision"], "gravity": 9.8, "damping": 0.99, "collision_elasticity": 0.3})
-    p0 = ctx.spatial.positions.copy()
-    ctx = phys.execute(ctx)
-    p1 = ctx.spatial.positions
-
-    # All entities should fall (z decreases)
-    for i in range(3):
-        assert p1[i, 2] < p0[i, 2], f"Entity {i} should fall"
-    print(f"  Position delta Z: {p1[:,2] - p0[:,2]}")
-    print(f"  Velocity Z: {ctx.spatial.velocities[:,2]}")
-
-    # e1 and e2 start overlapping — should be separated
-    d = np.linalg.norm(p1[0] - p1[1])
-    print(f"  e1-e2 distance after collision: {d:.2f} (min={ctx.spatial.radii[0]+ctx.spatial.radii[1]})")
-    assert d >= 9.5, f"Collision separation insufficient: {d}"
-    print("  ✓ Physics passed")
-
-
-# ── Test 3: Module chain factory ──
+# ── Test 2: Module chain factory ──
 def test_module_chain():
-    banner("Test 3: 模块链工厂")
-    re = RuleEngine.from_domain("military")
+    banner("Test 2: 模块链工厂")
+    re = RuleEngine.from_domain("literary")
     print(f"  领域: {re.pack['display_name']}")
     print(f"  指标: {re.metrics()}")
     modules = build_module_chain(re)
     for m in modules:
         print(f"  ✓ {m.name}: {m.description}")
-    assert len(modules) == 2, f"Expected 2 modules, got {len(modules)}"
+    assert len(modules) >= 3, f"Expected at least 3 modules, got {len(modules)}"
     print("  ✓ Module chain built")
 
 
-# ── Test 4: Context variable propagation ──
+# ── Test 3: Context variable propagation ──
 async def test_context_vars():
-    banner("Test 4: Token 上下文变量传播")
+    banner("Test 3: Token 上下文变量传播")
     sid = "test_sess_001"
     _current_session.set(sid)
     _current_phase.set("simulation")
@@ -155,11 +114,11 @@ async def test_context_vars():
     print("  ✓ Token context vars working")
 
 
-# ── Test 5: Full quantified round with modules ──
+# ── Test 4: Full quantified round with modules ──
 async def test_full_round():
-    banner("Test 5: 量化推演全流程 (3 agents × 3 rounds)")
+    banner("Test 4: 量化推演全流程 (3 agents × 3 rounds)")
 
-    re = RuleEngine.from_domain("military")
+    re = RuleEngine.from_domain("literary")
     print(f"  规则包: {re.pack['display_name']}")
     print(f"  指标: {re.metrics()} | 阈值: {re.thresholds()}")
 
@@ -247,8 +206,7 @@ async def main():
 
     failed = []
     for name, fn, is_async in [
-        ("ODE 连续演化", test_ode, False),
-        ("3D 物理引擎", test_physics, False),
+        ("FSM 角色状态追踪", test_fsm, False),
         ("模块链工厂", test_module_chain, False),
         ("Token 上下文传播", test_context_vars, True),
         ("量化推演全流程", test_full_round, True),
@@ -266,8 +224,7 @@ async def main():
 
     banner("结果")
     if failed:
-        print(f"  失败: {len(failed)}/{5}")
-        for f in failed:
+        print(f"  失败: {len(failed)}/4")
             print(f"    ✗ {f}")
         return 1
     else:
