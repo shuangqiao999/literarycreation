@@ -87,6 +87,7 @@ class SimulationAction:
     action_type: str  # "post", "reply", "decision", "interact", "observe"
     target_id: str = ""
     content: str = ""
+    driver: str = ""  # "forced" | "blueline" | "freeform"
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
 
