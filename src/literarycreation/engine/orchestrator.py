@@ -592,8 +592,13 @@ class DeductionOrchestrator:
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 path = _write(fname, text)
                 chapters_meta.append({"index": i, "title": f"第{i}章", "file": fname, "words": len(text)})
-                full_parts.append(f"第{i}章\n\n{text}")
-                prev_tail = text[-600:]
+
+                is_fallback = "正文生成失败" in text[:50]
+                if not is_fallback:
+                    full_parts.append(f"第{i}章\n\n{text}")
+                    prev_tail = text[-600:]
+                else:
+                    full_parts.append(f"第{i}章\n\n（正文生成失败，详细摘要见文件 {fname}）")
                 self._log("report", f"第{i}/{n}章已生成并保存（{len(text)} 字）→ {fname}")
 
         prose = "\n\n".join(full_parts)
