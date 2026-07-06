@@ -209,7 +209,7 @@ class StrategicReasoner:
             try:
                 resp = await self._chat_fn(
                     messages=[Message(role="user", content=prompt)],
-                    system=system, temperature=0.7,
+                    system=system, temperature=0.85,
                 )
                 return _parse_json(resp.text)
             except Exception as e:
