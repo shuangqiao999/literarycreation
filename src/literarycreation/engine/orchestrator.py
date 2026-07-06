@@ -394,7 +394,9 @@ class DeductionOrchestrator:
                       f"阶段4: 量化并行模拟开始 ({total_rounds} 轮, {len(states)} 个量化实体, "
                       f"领域={re_engine.domain})")
         else:
-            self._log("simulation", f"阶段4: 并行模拟开始 ({total_rounds} 轮)")
+            self._log("simulation", "规则包加载失败，跳过模拟阶段")
+            self.store.update(self.session.id, status=SessionStatus.COMPLETE.value)
+            return
 
         from .simulator import SimulationEngine
 

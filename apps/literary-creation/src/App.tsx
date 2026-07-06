@@ -632,7 +632,10 @@ export default function App() {
           >
             {domains.length > 0
               ? domains.map(d => <option key={d.domain} value={d.domain}>{d.name}</option>)
-              : ["现实主义", "浪漫主义", "悬疑", "史诗", "宫廷剧"].map(s => <option key={s} value={s}>🎨 {s}</option>)
+              : [
+                ["literary_realism", "现实主义"], ["literary_romance", "浪漫主义"],
+                ["literary_suspense", "悬疑"], ["literary_epic", "史诗"], ["literary_court", "宫廷剧"],
+              ].map(([key, label]) => <option key={key} value={key}>🎨 {label}</option>)
             }
           </select>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
