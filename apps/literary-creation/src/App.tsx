@@ -353,7 +353,7 @@ export default function App() {
   }, [fetchGraph, fetchLogs, fetchReport, fetchTimeline, fetchCausal]);
 
   const handleCreate = useCallback(async () => {
-    if (!title.trim()) return;
+    if (!title.trim()) { alert("请输入会话标题"); return; }
     // Mode 1 需种子文本；Mode 2 需至少一个有效角色
     const validChars = characters.filter(c => c.name.trim());
     if (inputMode === "seed" && !sourceMaterial.trim()) { alert("请输入小说开头/种子文本"); return; }

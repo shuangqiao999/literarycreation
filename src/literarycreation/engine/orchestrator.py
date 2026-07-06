@@ -461,11 +461,14 @@ class DeductionOrchestrator:
     async def _phase5_report(self) -> None:
         _current_phase.set("report")
 
-        is_literary = (
-            self._rule_engine is not None
-            and self._rule_engine.domain.startswith("literary")
-            and self._states
-        )
+        # 规则包加载失败 → 无输出可直接结束，不走非文学分支（reporter.py 已删除）
+        if self._rule_engine is None:
+            self._log("report", "未加载规则包，跳过阶段5")
+            self.store.update(self.session.id, status=SessionStatus.COMPLETE.value,
+                              report_json='{}')
+            return
+
+        is_literary = self._rule_engine.domain.startswith("literary")
 
         # ── 文学模式：散文渲染为主输出，跳过推演分析报告 ──
         if is_literary:
@@ -490,44 +493,10 @@ class DeductionOrchestrator:
                               report_json=_json.dumps(report_payload, ensure_ascii=False))
             return
 
-        # ── 非文学模式：原有推演分析报告 ──
-        self._log("report", "阶段5: 报告生成开始")
-
-        from .reporter import generate_report
-        report = await generate_report(
-            session=self.session,
-            graph=self.graph,
-            rounds=getattr(self, "_simulation_rounds", []),
-            log_fn=self._log,
-            preprocessor=getattr(self, "_preprocessor", None),
-            pre_goals=getattr(self, "_pre_goals", []),
-            states=getattr(self, "_states", None),
-        )
-        self.session.report = report
-
-        report_payload = {
-            "summary": report.summary,
-            "key_events": report.key_events,
-            "risk_alerts": report.risk_alerts,
-            "recommendations": report.recommendations,
-            "causal_summary": report.causal_summary,
-            "stage_narratives": report.stage_narratives,
-            "deviation_analysis": report.deviation_analysis,
-            "conclusion": report.conclusion,
-        }
-        if self._rule_engine is not None and self._states:
-            report_payload["quantified"] = True
-            report_payload["domain"] = self._rule_engine.domain
-            report_payload["final_states"] = {
-                eid: {"name": st.name, "metrics": st.metrics,
-                      "history": st.history[-60:],
-                      "alive": self._rule_engine.is_alive(st)}
-                for eid, st in self._states.items()
-            }
-
+        # 降级：无可渲染的状态数据
+        self._log("report", "无状态数据，保存空报告")
         self.store.update(self.session.id,
-                          report_json=_json.dumps(report_payload, ensure_ascii=False))
-        self._log("report", f"报告生成完成: {report.summary[:100]}...")
+                          report_json=_json.dumps({"is_literary": True, "domain": self._rule_engine.domain, "prose": ""}, ensure_ascii=False))
 
     async def _render_prose(self, report_payload: dict[str, Any]) -> None:
         """文学模式 Phase 5：逐章生成正文并落盘，计算提纲对齐。"""
