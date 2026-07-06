@@ -333,9 +333,16 @@ class SimulationEngine:
                     except Exception as e:
                         logger.warning("[Simulator] Event memory write failed: %s", e)
 
+        # 写入 narrator 文本供 prose renderer
+        narration = ""
         if self._enable_narrate and hasattr(self, '_chat_fn'):
             narration = await self._narrate_round(client, round_number, decisions, deltas)
-            sim_round.state_delta = {"narration": narration}
+
+        # 提供角色状态快照供 prose 渲染器使用
+        snapshots = {}
+        for eid, st in self._states.items():
+            snapshots[eid] = {"name": st.name, "metrics": dict(st.metrics)}
+        sim_round.state_delta = {"narration": narration, "states": snapshots}
 
         return sim_round
 
