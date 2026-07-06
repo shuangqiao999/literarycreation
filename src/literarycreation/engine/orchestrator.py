@@ -177,18 +177,14 @@ class DeductionOrchestrator:
 
         # 2. 恢复规则包
         domain = (cfg.get("domain") or "").strip()
-        custom = cfg.get("custom_rules")
-        if domain and domain != "narrative":
+        if domain:
             from .rule_engine import RuleEngine
             try:
-                if domain == "custom" and custom:
-                    self._rule_engine = RuleEngine.from_custom(custom)
-                else:
-                    self._rule_engine = RuleEngine.from_domain(domain)
+                self._rule_engine = RuleEngine.from_domain(domain)
                 self._log("orchestrator",
                           f"恢复规则包: {self._rule_engine.pack.get('display_name', domain)}")
             except Exception as e:
-                logger.warning("[Orchestrator] 规则包恢复失败，回退叙事: %s", e)
+                logger.warning("[Orchestrator] 规则包恢复失败: %s", e)
                 self._rule_engine = None
 
         # 3. 恢复预处理器 (打开已有 LanceDB 表)

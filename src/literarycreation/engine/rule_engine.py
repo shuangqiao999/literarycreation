@@ -1,8 +1,7 @@
-"""规则引擎：将 LLM 决策意图映射为量化指标变化，并做存亡/胜负判定。
+"""规则引擎：将 LLM 决策意图映射为指标变化。
 
 核心职责：
-- 加载规则包（内置领域模板或用户上传的自定义 JSON）
-- detect_domain：LLM 领域识别 + 置信度阈值回退叙事
+- 加载文学风格规则包
 - init_state：按规则包 initial_metrics 创建 EntityState
 - resolve_round：基于"轮初快照"统一计算本轮全部 delta（self + target，多方累加），
   由调用方批量应用，避免同轮先手偏差
@@ -65,10 +64,6 @@ class RuleEngine:
         if tpl is None:
             raise ValueError(f"未知领域规则包: {domain}")
         return cls(tpl)
-
-    @classmethod
-    def from_custom(cls, data: dict[str, Any]) -> "RuleEngine":
-        return cls(data)
 
     @staticmethod
     def _with_defaults(pack: dict[str, Any]) -> dict[str, Any]:
