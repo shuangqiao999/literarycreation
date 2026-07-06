@@ -332,11 +332,33 @@ class SimulationEngine:
         snapshots = {}
         for eid, st in self._states.items():
             snapshots[eid] = {"name": st.name, "metrics": dict(st.metrics)}
-        sim_round.state_delta = {"narration": narration, "states": snapshots}
+        sim_round.state_delta = {"narration": narration, "states": snapshots, "snapshot": self._build_state_snapshot(round_number)}
 
         return sim_round
 
     # ── Helpers ──
+
+    def _build_state_snapshot(self, round_number: int) -> dict:
+        """态势简报数据，供前端 dashboard 面板。"""
+        re = self._rule_engine
+        metrics_list = re.metrics() if re else []
+        entities: list[dict] = []
+        for st in self._states.values():
+            entities.append({
+                "name": getattr(st, "name", "?"),
+                "metrics": {k: round(float(v), 1) for k, v in st.metrics.items()},
+            })
+        averages: dict[str, float] = {}
+        if metrics_list and entities:
+            for m in metrics_list:
+                vals = [e["metrics"].get(m, 0) for e in entities]
+                averages[m] = round(sum(vals) / len(vals), 1)
+        recent = self._build_recent_context()
+        return {
+            "round": round_number, "entity_count": len(self._states),
+            "entities": entities, "averages": averages,
+            "recent": recent,
+        }
 
     async def _retrieve_memory(self, agent: Any, round_number: int) -> tuple[str, str, str]:
         """Retrieve memory: LanceDB static + dynamic + Kuzu self-events."""
