@@ -49,6 +49,8 @@ class DeductionOrchestrator:
         self._round_callback = round_callback
         self._resume_start_round = resume_start_round
         self._fsm_override_store = fsm_override_store if fsm_override_store is not None else {}
+        from literarycreation.core.config import config as _cfg
+        self._max_concurrent = _cfg.deduction_max_concurrent
         # 量化模式状态（rule_engine 非空即量化）
         self._rule_engine: Any = None
         self._states: dict[str, Any] = {}
@@ -426,6 +428,7 @@ class DeductionOrchestrator:
             fsm_override_store=self._fsm_override_store,
             mode=mode,
             event_scheduler=event_scheduler,
+            max_concurrent=self._max_concurrent,
         )
 
         rounds: list[SimulationRound] = []

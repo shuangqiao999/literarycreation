@@ -50,6 +50,7 @@ class SimulationEngine:
         fsm_override_store: dict | None = None,
         mode: Literal["freeform", "blueline"] = "freeform",
         event_scheduler: EventScheduler | None = None,
+        max_concurrent: int = 2,
     ) -> None:
         self.agents = agents
         self.graph = graph
@@ -72,6 +73,8 @@ class SimulationEngine:
         self._mode = mode
         self._scheduler = event_scheduler
         self._round_mandate: str = ""
+        self._max_concurrent = max(1, max_concurrent)
+        self._sem = asyncio.Semaphore(self._max_concurrent)
 
         from .strategic_reasoner import StrategicReasoner
         self.reasoner = StrategicReasoner(
@@ -137,26 +140,23 @@ class SimulationEngine:
             self._preprocessor.clear_round_cache()
 
         alive_agents = self.agents
-        decisions: list[dict[str, Any]] = []
 
-        for agent in alive_agents:
+        async def _decide(agent):
             if self._cancel is not None and self._cancel.is_set():
                 raise _PhaseCancelledError()
             ov = self._pop_override(agent)
             if ov is not None:
                 ov["actor_id"] = agent.entity_id
                 ov["driver"] = "forced"
-                decisions.append(ov)
-                continue
+                return ov
             st = self._states.get(agent.entity_id)
             if st is None:
-                continue
+                return None
             others = self._build_others_ctx(agent.entity_id, alive_agents)
             dyn, static, kuzu_self = await self._retrieve_memory(agent, round_number)
             rel_ctx = self._build_relation_context(agent.entity_id)
             recent = self._build_recent_context()
 
-            # 增强记忆：LanceDB 语义 + Kuzu 精确时间线
             memory_parts = []
             if kuzu_self:
                 memory_parts.append(f"【你最近做过的事】\n{kuzu_self}")
@@ -164,14 +164,15 @@ class SimulationEngine:
                 memory_parts.append(f"【相关历史记忆】\n{dyn}")
             enhanced_dynamic = "\n\n".join(memory_parts) or dyn
 
-            dec = await self.reasoner.reason_narrative(
-                agent=agent, round_number=round_number, state=st,
-                event_mandate=mandate_text, correction_level=correction_level,
-                other_context=others, relationship_context=rel_ctx,
-                static_knowledge=static, dynamic_memory=enhanced_dynamic,
-                recent_events=recent, env_context=self._env_context(),
-                cached_action_catalog=self._cached_action_catalog(),
-            )
+            async with self._sem:
+                dec = await self.reasoner.reason_narrative(
+                    agent=agent, round_number=round_number, state=st,
+                    event_mandate=mandate_text, correction_level=correction_level,
+                    other_context=others, relationship_context=rel_ctx,
+                    static_knowledge=static, dynamic_memory=enhanced_dynamic,
+                    recent_events=recent, env_context=self._env_context(),
+                    cached_action_catalog=self._cached_action_catalog(),
+                )
             if dec:
                 dec["actor_id"] = agent.entity_id
                 dec["driver"] = "blueline"
@@ -181,7 +182,9 @@ class SimulationEngine:
             dec.setdefault("action_type", "observe")
             dec.setdefault("intensity", 0.3)
             dec.setdefault("target", "")
-            decisions.append(dec)
+            return dec
+
+        decisions = [r for r in await asyncio.gather(*[_decide(a) for a in alive_agents]) if r is not None]
 
         return await self._apply_decisions(round_number, decisions, client, sim_round)
 
@@ -208,20 +211,18 @@ class SimulationEngine:
             self._preprocessor.clear_round_cache()
 
         alive_agents = self.agents
-        decisions: list[dict[str, Any]] = []
 
-        for agent in alive_agents:
+        async def _decide(agent):
             if self._cancel is not None and self._cancel.is_set():
                 raise _PhaseCancelledError()
             ov = self._pop_override(agent)
             if ov is not None:
                 ov["actor_id"] = agent.entity_id
                 ov["driver"] = "forced"
-                decisions.append(ov)
-                continue
+                return ov
             st = self._states.get(agent.entity_id)
             if st is None:
-                continue
+                return None
             others = self._build_others_ctx(agent.entity_id, alive_agents)
             dyn, static, kuzu_self = await self._retrieve_memory(agent, round_number)
             rel_ctx = self._build_relation_context(agent.entity_id)
@@ -234,13 +235,14 @@ class SimulationEngine:
                 memory_parts.append(f"【相关历史记忆】\n{dyn}")
             enhanced_dynamic = "\n\n".join(memory_parts) or dyn
 
-            dec = await self.reasoner.reason_quantified(
-                agent=agent, round_number=round_number, state=st,
-                other_context=others, relationship_context=rel_ctx,
-                static_knowledge=static, dynamic_memory=enhanced_dynamic,
-                recent_events=recent, env_context=self._env_context(),
-                cached_action_catalog=self._cached_action_catalog(),
-            )
+            async with self._sem:
+                dec = await self.reasoner.reason_quantified(
+                    agent=agent, round_number=round_number, state=st,
+                    other_context=others, relationship_context=rel_ctx,
+                    static_knowledge=static, dynamic_memory=enhanced_dynamic,
+                    recent_events=recent, env_context=self._env_context(),
+                    cached_action_catalog=self._cached_action_catalog(),
+                )
             if dec:
                 dec["actor_id"] = agent.entity_id
                 dec["driver"] = "freeform"
@@ -250,7 +252,9 @@ class SimulationEngine:
             dec.setdefault("action_type", "observe")
             dec.setdefault("intensity", 0.3)
             dec.setdefault("target", "")
-            decisions.append(dec)
+            return dec
+
+        decisions = [r for r in await asyncio.gather(*[_decide(a) for a in alive_agents]) if r is not None]
 
         return await self._apply_decisions(round_number, decisions, client, sim_round)
 
