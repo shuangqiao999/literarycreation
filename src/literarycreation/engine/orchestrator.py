@@ -508,7 +508,7 @@ class DeductionOrchestrator:
 
         from literarycreation.core.config import config as _cfg
 
-        from .prose_renderer import ProseRenderer
+        from .prose_renderer import ProseRenderer, build_story_context, append_chapter_summary
 
         rounds = list(getattr(self, "_simulation_rounds", []))
         style = getattr(self, "_style", "现实主义")
@@ -564,6 +564,7 @@ class DeductionOrchestrator:
                                           report_payload.get("final_states", {}), [], characters, outline)
             full_parts.append(prose)
         else:
+            story_state = {}  # 累积剧情状态
             for i, rnd in enumerate(rounds, 1):
                 self._check_cancel()
                 events = [act.content for act in rnd.actions if getattr(act, "content", "")]
@@ -581,6 +582,9 @@ class DeductionOrchestrator:
                     except Exception:
                         pass
 
+                # 构建累积剧情上下文
+                story_ctx = build_story_context(story_state, i)
+
                 text = await renderer.render_chapter(
                     chapter_idx=i, total_chapters=n,
                     seed_text=self.session.source_material,
@@ -588,6 +592,7 @@ class DeductionOrchestrator:
                     round_states=states, prev_tail=prev_tail,
                     outline_event=outline_event, target_words=per_ch,
                     chapter_context=chapter_ctx,
+                    story_context=story_ctx,
                 )
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 path = _write(fname, text)
@@ -597,6 +602,8 @@ class DeductionOrchestrator:
                 if not is_fallback:
                     full_parts.append(f"第{i}章\n\n{text}")
                     prev_tail = text[-600:]
+                    # 更新累积剧情状态，供下一章参考
+                    append_chapter_summary(story_state, i, text, states)
                 else:
                     full_parts.append(f"第{i}章\n\n（正文生成失败，详细摘要见文件 {fname}）")
                 self._log("report", f"第{i}/{n}章已生成并保存（{len(text)} 字）→ {fname}")
