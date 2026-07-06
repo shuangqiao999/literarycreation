@@ -163,12 +163,32 @@ class RuleEngine:
         return {"<": mv < val, ">": mv > val, "<=": mv <= val, ">=": mv >= val,
                 "==": mv == val, "!=": mv != val}[op]
 
+    @staticmethod
+    def _infer_action(action: str) -> str:
+        """从自由文本动作描述推断最接近的效果类别。"""
+        al = action.lower()
+        keywords = {
+            "confront": ("对抗", "质问", "威胁", "攻击", "指责", "打", "杀", "刺杀", "confront", "attack"),
+            "confess": ("坦白", "告白", "承认", "倾诉", "表达", "告诉", "confess"),
+            "ally": ("结盟", "合作", "联手", "帮助", "支援", "投靠", "ally"),
+            "betray": ("背叛", "出卖", "告密", "反水", "背叛", "betray"),
+            "investigate": ("调查", "查探", "潜入", "搜寻", "寻找", "打探", "翻", "找", "查", "investigate"),
+            "protect": ("保护", "守护", "掩护", "护卫", "护", "救", "protect"),
+            "manipulate": ("操控", "利用", "诱导", "欺骗", "操纵", "说服", "拉拢", "manipulate"),
+            "observe": ("观察", "等待", "旁观", "静待", "观望", "observe"),
+        }
+        for cat, kws in keywords.items():
+            if any(kw in al for kw in kws):
+                return cat
+        return "observe"
+
     def compute_deltas(self, action: str, intensity: float,
                        env: dict[str, str] | None = None,
                        state: Any = None) -> tuple[dict, dict]:
         intensity = max(0.0, min(1.0, float(intensity)))
-        self_d = {k: v * intensity for k, v in self.pack["self_effects"].get(action, {}).items()}
-        tgt_d = {k: v * intensity for k, v in self.pack["target_effects"].get(action, {}).items()}
+        effective = action if action in self.pack["self_effects"] else self._infer_action(action)
+        self_d = {k: v * intensity for k, v in self.pack["self_effects"].get(effective, {}).items()}
+        tgt_d = {k: v * intensity for k, v in self.pack["target_effects"].get(effective, {}).items()}
         # 状态依赖条件效应
         if state is not None:
             for key, cfg in self.pack.get("conditional_effects", {}).items():

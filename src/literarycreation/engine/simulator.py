@@ -157,21 +157,14 @@ class SimulationEngine:
             rel_ctx = self._build_relation_context(agent.entity_id)
             recent = self._build_recent_context()
 
-            memory_parts = []
-            if kuzu_self:
-                memory_parts.append(f"【你最近做过的事】\n{kuzu_self}")
-            if dyn:
-                memory_parts.append(f"【相关历史记忆】\n{dyn}")
-            enhanced_dynamic = "\n\n".join(memory_parts) or dyn
-
             async with self._sem:
                 dec = await self.reasoner.reason_narrative(
                     agent=agent, round_number=round_number, state=st,
                     event_mandate=mandate_text, correction_level=correction_level,
                     other_context=others, relationship_context=rel_ctx,
-                    static_knowledge=static, dynamic_memory=enhanced_dynamic,
+                    static_knowledge=static, dynamic_memory=dyn,
                     recent_events=recent, env_context=self._env_context(),
-                    cached_action_catalog=self._cached_action_catalog(),
+                    self_memory=kuzu_self,
                 )
             if dec:
                 dec["actor_id"] = agent.entity_id
@@ -228,20 +221,13 @@ class SimulationEngine:
             rel_ctx = self._build_relation_context(agent.entity_id)
             recent = self._build_recent_context()
 
-            memory_parts = []
-            if kuzu_self:
-                memory_parts.append(f"【你最近做过的事】\n{kuzu_self}")
-            if dyn:
-                memory_parts.append(f"【相关历史记忆】\n{dyn}")
-            enhanced_dynamic = "\n\n".join(memory_parts) or dyn
-
             async with self._sem:
                 dec = await self.reasoner.reason_quantified(
                     agent=agent, round_number=round_number, state=st,
                     other_context=others, relationship_context=rel_ctx,
-                    static_knowledge=static, dynamic_memory=enhanced_dynamic,
+                    static_knowledge=static, dynamic_memory=dyn,
                     recent_events=recent, env_context=self._env_context(),
-                    cached_action_catalog=self._cached_action_catalog(),
+                    self_memory=kuzu_self,
                 )
             if dec:
                 dec["actor_id"] = agent.entity_id
@@ -392,6 +378,7 @@ class SimulationEngine:
         ) or "（无近期事件）"
 
     def _build_others_ctx(self, self_id: str, alive_agents: list) -> str:
+        from .strategic_reasoner import _metrics_to_narrative
         lines = []
         for a in alive_agents:
             if a.entity_id == self_id:
@@ -399,7 +386,7 @@ class SimulationEngine:
             st = self._states.get(a.entity_id)
             if st is None:
                 continue
-            lines.append(st.to_prompt_context())
+            lines.append(_metrics_to_narrative(st))
         return "\n".join(lines) or "（无其他参与方）"
 
     def _build_relation_context(self, entity_id: str) -> str:
@@ -447,12 +434,6 @@ class SimulationEngine:
         if terrain:
             parts.append(f"地形: {terrain}")
         return "； ".join(parts) if parts else ""
-
-    def _cached_action_catalog(self) -> str:
-        if not self._rule_engine:
-            return ""
-        actions = self._rule_engine.pack.get("actions", [])
-        return "、".join(actions) if actions else ""
 
     async def _narrate_round(self, client: Any, round_number: int,
                              decisions: list[dict], deltas: dict) -> str:

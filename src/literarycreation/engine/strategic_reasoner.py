@@ -1,6 +1,6 @@
-"""Reasoner — LLM决策推理，支持自由创作与蓝图执行两种模式。
+"""Reasoner — LLM决策推理，叙事导向。
 
-精简设计：仅保留文学创作的 LLM 推理能力，移除策略推演的信任矩阵与多候选评分。
+角色基于人格、记忆、弧光自然推理行动，无预定义动作约束。
 """
 from __future__ import annotations
 
@@ -10,6 +10,56 @@ import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _metrics_to_narrative(state: Any) -> str:
+    """将数值指标转换为叙事语言，让 LLM 理解角色的情感状态。"""
+    m = state.metrics if hasattr(state, "metrics") else {}
+    lines = [f"{state.name if hasattr(state, 'name') else '角色'}当前的内心状态："]
+
+    trust = m.get("trust", 50)
+    if trust < 20:
+        lines.append("- 你对身边的人几乎完全失去了信任")
+    elif trust < 40:
+        lines.append("- 你对大多数人心存戒备，只信任极少数亲近之人")
+    elif trust > 80:
+        lines.append("- 你对周围的人抱有深厚的信任")
+
+    tension = m.get("tension", 20)
+    if tension > 70:
+        lines.append("- 局势已经紧张到了极点，冲突一触即发")
+    elif tension > 40:
+        lines.append("- 空气中弥漫着不安，你感到冲突在逼近")
+    elif tension < 15:
+        lines.append("- 眼下局势相对平静，但暗流涌动")
+
+    affection = m.get("affection", 40)
+    if affection > 70:
+        lines.append("- 你内心深处涌动着强烈的情感，渴望向某人表达")
+    elif affection < 25:
+        lines.append("- 你的情感正在冷却，对周围人越来越疏远")
+
+    power = m.get("power", 40)
+    if power > 70:
+        lines.append("- 你手中握有相当的影响力，可以改变局势")
+    elif power < 25:
+        lines.append("- 你感到自己的力量正在流失，处境被动")
+
+    mystery = m.get("mystery", 30)
+    if mystery > 70:
+        lines.append("- 真相仍然隐藏在迷雾之中，你渴望揭开它")
+    elif mystery < 20:
+        lines.append("- 谜团所剩无几，真相即将大白")
+
+    fatigue = m.get("fatigue", 10)
+    if fatigue > 70:
+        lines.append("- 你已经筋疲力尽，每一步都沉重无比")
+    elif fatigue > 40:
+        lines.append("- 疲惫开始侵蚀你的判断，你需要喘息")
+    elif fatigue < 15:
+        lines.append("- 你精神尚可，仍有行动的余力")
+
+    return "\n".join(lines)
 
 
 class StrategicReasoner:
@@ -43,43 +93,47 @@ class StrategicReasoner:
         recent_events: str = "",
         env_context: str = "",
         user_cmd: str = "",
-        cached_action_catalog: str = "",
+        self_memory: str = "",
     ) -> dict[str, Any]:
-        """Mode A: agent makes a free decision based on character and context."""
+        """自由创作：角色基于人格和处境，自由决定下一步行动。"""
         goals = agent.goals if hasattr(agent, "goals") else []
         goals_txt = "\n".join(f"- {g}" for g in goals) if goals else "（无具体目标）"
         imm = "；".join(self._immutable_goals) if self._immutable_goals else "无"
+        narrative_state = _metrics_to_narrative(state)
 
         header = (
-            f"你是「{agent.name}」，正处于一场文学创作的第 {round_number} 轮。\n"
-            f"请基于你的人格、目标与当前数值状态，从可选行动中选择一个并给出投入力度。\n\n"
-            f"你的决策应推动故事向更精彩的结局发展。适当的对抗、冲突和意外会增强叙事张力。\n\n"
+            f"你是「{agent.name}」。\n\n"
             f"## 你的人格\n{agent.persona or '（无）'}\n\n"
             f"## 你的目标\n{goals_txt}\n\n"
-            f"## 不可变战略指令（最高优先级）\n{imm}\n"
+            f"## 你当前的状态\n{narrative_state}\n"
         )
+        if self_memory:
+            header += f"\n## 你最近做过的事\n{self_memory}\n"
         if user_cmd:
             header += f"\n## 外部干预指令（最高优先级）\n{user_cmd}\n"
-        header += f"\n## 你的当前状态\n{state.to_prompt_context()}\n"
         if other_context:
-            header += f"\n## 其他参与方状态\n{other_context}\n"
+            header += f"\n## 其他角色状态\n{other_context}\n"
         if relationship_context:
-            header += f"\n## 关系网络\n{relationship_context}\n"
-        if static_knowledge:
-            header += f"\n## 原著背景\n{static_knowledge}\n"
+            header += f"\n## 你的关系网络\n{relationship_context}\n"
         if dynamic_memory:
-            header += f"\n## 历史记忆\n{dynamic_memory}\n"
+            header += f"\n## 相关的过往事件\n{dynamic_memory}\n"
         if recent_events:
             header += f"\n## 近期局势\n{recent_events}\n"
+        if static_knowledge:
+            header += f"\n## 原著背景参考\n{static_knowledge}\n"
         if env_context:
-            header += f"\n## 地形与天气\n{env_context}\n"
-        if cached_action_catalog:
-            header += f"\n## 可选行动\n{cached_action_catalog}\n"
-        header += f"\n## 输出 JSON\n{_SINGLE_SPEC}"
+            header += f"\n## 环境\n{env_context}\n"
+
+        header += (
+            f"\n现在，请以{agent.name}的身份，基于以上所有信息，决定你下一步的行动。\n"
+            "你可以做任何符合你性格和处境的行动，不需要局限于预定义的类型。\n"
+            "冲突和意外是故事的燃料——不要害怕做出大胆的选择。\n\n"
+            + _FREE_SPEC
+        )
 
         return await self._call_llm(
             header,
-            system="你是文学创作中的角色，基于角色设定做出合理决策。只输出 JSON。",
+            system="你是一位文学创作中的角色。基于你的人格、记忆和处境，自由决定下一步行动。只输出 JSON。",
         )
 
     async def reason_narrative(
@@ -96,11 +150,12 @@ class StrategicReasoner:
         dynamic_memory: str = "",
         recent_events: str = "",
         env_context: str = "",
-        cached_action_catalog: str = "",
+        self_memory: str = "",
     ) -> dict[str, Any]:
-        """Mode B: agent is guided by scheduled events with graduated enforcement."""
+        """蓝图执行：角色在既定事件结构内自由演绎。"""
         goals = agent.goals if hasattr(agent, "goals") else []
         goals_txt = "\n".join(f"- {g}" for g in goals) if goals else "（无）"
+        narrative_state = _metrics_to_narrative(state)
 
         correction_directive = ""
         if correction_level == "soft":
@@ -113,18 +168,14 @@ class StrategicReasoner:
                 f"外部事件：{event_mandate or '重大事件发生'}"
             )
 
-        narrative_role = (
-            "你是一位文学创作中的角色。当前轮次有必须推动的剧情事件，"
-            "你的任务是：为角色的行动找到可信的内心动机，然后以角色的身份演绎这个事件。"
-        )
         header = (
-            f"{narrative_role}\n\n"
-            f"## 你的角色\n"
-            f"名称：{agent.name}\n"
-            f"人格：{agent.persona or '（无）'}\n"
-            f"目标：{goals_txt}\n\n"
-            f"## 当前状态\n{state.to_prompt_context()}\n"
+            f"你是「{agent.name}」，这是一个文学创作中的关键场景。\n\n"
+            f"## 你的人格\n{agent.persona or '（无）'}\n\n"
+            f"## 你的目标\n{goals_txt}\n\n"
+            f"## 你当前的状态\n{narrative_state}\n"
         )
+        if self_memory:
+            header += f"\n## 你最近做过的事\n{self_memory}\n"
         if event_mandate:
             header += f"\n## 【本轮必须推动的剧情】\n{event_mandate}\n"
         if correction_directive:
@@ -132,20 +183,23 @@ class StrategicReasoner:
         if other_context:
             header += f"\n## 其他角色状态\n{other_context}\n"
         if relationship_context:
-            header += f"\n## 关系网络\n{relationship_context}\n"
+            header += f"\n## 你的关系网络\n{relationship_context}\n"
         if dynamic_memory:
-            header += f"\n## 近期事件\n{dynamic_memory}\n"
+            header += f"\n## 相关的过往事件\n{dynamic_memory}\n"
         if static_knowledge:
-            header += f"\n## 原著背景\n{static_knowledge}\n"
+            header += f"\n## 原著背景参考\n{static_knowledge}\n"
         if env_context:
             header += f"\n## 环境\n{env_context}\n"
-        if cached_action_catalog:
-            header += f"\n## 可选行动\n{cached_action_catalog}\n"
-        header += f"\n## 输出 JSON\n{_SINGLE_SPEC}"
+
+        header += (
+            f"\n请以{agent.name}的身份，自由演绎本轮的剧情。"
+            "你可以做任何符合角色性格的选择，不需要局限于预定义的动作类型。\n\n"
+            + _FREE_SPEC
+        )
 
         return await self._call_llm(
             header,
-            system="你是文学创作中的角色，为剧情事件找到可信动机并演绎。只输出 JSON。",
+            system="你是文学创作中的角色。基于你的人格、记忆和处境，自由演绎剧情。只输出 JSON。",
         )
 
     async def _call_llm(self, prompt: str, system: str) -> dict[str, Any]:
@@ -180,10 +234,11 @@ def _parse_json(raw: str) -> dict[str, Any]:
         return {}
 
 
-_SINGLE_SPEC = """```json
+_FREE_SPEC = """## 输出 JSON（仅 JSON，无解释）
+```json
 {
-  "action_type": "上面之一",
-  "target": "目标方名称",
+  "action_type": "你的具体行动描述（自由文本，如'潜入档案室寻找证据'、'向陆远坦白自己对师父之死的怀疑'）",
+  "target": "行动的涉及对象或留空",
   "intensity": 0.0到1.0,
   "rationale": "20-50字理由"
 }
