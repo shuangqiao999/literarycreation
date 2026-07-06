@@ -67,20 +67,26 @@ async def _retry_prose(client, prompt, story_context, target_words, chapter_idx)
     """LLM prose generation with up to 3 retries at decreasing complexity."""
     from literarycreation.core.llm_client import Message
 
+    # 中文约 1.5-2 tokens/字，取 2 倍 + 20% 冗余
+    max_tok_full = int(target_words * 2.4) if target_words and target_words > 0 else 0
+    max_tok_half = max(2048, int(target_words * 1.2)) if target_words and target_words > 0 else 0
+
     strategies = [
-        (prompt, "你是文学作家，逐章创作小说/剧本正文，文笔细腻、承接自然。", 0.85),
+        (prompt, "你是文学作家，逐章创作小说/剧本正文，文笔细腻、承接自然。",
+         0.85, max_tok_full),
         (prompt.replace(f"本章篇幅约 {target_words} 字",
                          f"本章篇幅约 {max(target_words // 2, 500)} 字"),
-         "你是文学作家，输出小说正文。", 0.5),
+         "你是文学作家，输出小说正文。", 0.5, max_tok_half),
         (f"【当前剧情进度】\n{story_context[:800]}\n\n请用300字续写，推进主线剧情：",
-         "你是一位作家，输出小说正文。", 0.3),
+         "你是一位作家，输出小说正文。", 0.3, 800),
     ]
 
     last_error = None
-    for idx, (p, sys, temp) in enumerate(strategies):
+    for idx, (p, sys, temp, max_tok) in enumerate(strategies):
         try:
+            kwargs = {"max_tokens": max_tok} if max_tok else {}
             resp = await client().chat([Message(role="user", content=p)],
-                                       system=sys, temperature=temp)
+                                       system=sys, temperature=temp, **kwargs)
             text = extract_text(resp).strip()
             if text and len(text) > 80:
                 if idx > 0:
@@ -320,6 +326,7 @@ class ProseRenderer:
                 [Message(role="user", content=prompt)],
                 system="你是文学作家，输出小说/剧本正文，文笔细腻、情节连贯。",
                 temperature=0.8,
+                max_tokens=32768,
             )
             text = extract_text(resp).strip()
             if not text:
