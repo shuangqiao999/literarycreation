@@ -312,8 +312,12 @@ class SimulationEngine:
         if self._persist_events:
             for action in sim_round.actions:
                 event_id = f"evt-{uuid.uuid4().hex[:8]}"
+                # 构建因果摘要：记录该行动对各指标的影响
+                actor = action.agent_id
+                eff = deltas.get(actor, {})
+                effect_txt = "，".join(f"{k}{v:+.0f}" for k, v in eff.items()) if eff else ""
                 self.graph.add_event(event_id, action.content[:200], action.action_type,
-                                     action.timestamp, action.agent_id)
+                                     action.timestamp, action.agent_id, effect=effect_txt)
                 self.graph.add_acted(action.agent_id, event_id, action.action_type, action.timestamp)
                 if self._preprocessor is not None:
                     try:
@@ -365,6 +369,15 @@ class SimulationEngine:
         dyn, static, kuzu_self = "", "", ""
         if self._preprocessor is not None:
             query = getattr(agent, "persona", "") + " " + getattr(agent, "name", "")
+            # Kuzu 关系邻居增强 LanceDB 检索相关性
+            if self.graph is not None:
+                try:
+                    nb = self.graph.get_entity_neighbors(agent.entity_id)
+                    names = [n["name"] for n in nb.get("neighbors", []) if n.get("name")][:3]
+                    if names:
+                        query += " " + " ".join(names)
+                except Exception:
+                    pass
             try:
                 static = self._preprocessor.retrieve_for_entity(query, agent.entity_id, top_k=2)
             except Exception:
@@ -379,9 +392,13 @@ class SimulationEngine:
                 events = self.graph.get_recent_events_for_agent(
                     getattr(agent, "entity_id", agent.name), last_n=5)
                 if events:
-                    kuzu_self = "；\n".join(
-                        f"[R{e['round']}] {e['action']}: {e['description'][:100]}"
-                        for e in events)
+                    parts = []
+                    for e in events:
+                        base = f"[R{e['round']}] {e['action']}: {e['description'][:100]}"
+                        if e.get("effect"):
+                            base += f" → 造成影响：{e['effect']}"
+                        parts.append(base)
+                    kuzu_self = "；\n".join(parts)
             except Exception:
                 pass
         return (dyn or "（无近期动态事件）"), (static or "（无原著参考）"), kuzu_self

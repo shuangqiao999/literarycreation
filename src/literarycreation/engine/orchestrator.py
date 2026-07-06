@@ -497,6 +497,38 @@ class DeductionOrchestrator:
         self.store.update(self.session.id,
                           report_json=_json.dumps({"is_literary": True, "domain": self._rule_engine.domain, "prose": ""}, ensure_ascii=False))
 
+    @staticmethod
+    def _retrieve_style_anchors(pp: Any, source: str) -> list[str]:
+        """从 LanceDB 检索原文中最具风格代表性的片段。"""
+        try:
+            chunks = pp.retrieve_for_entity(source[:200], top_k=5)
+        except Exception:
+            return []
+        # 优先长句（>150 字）含描写的段落
+        return [c for c in chunks if len(c) > 150][:3] or chunks[:3]
+
+    @staticmethod
+    def _build_continuity_ctx(graph: Any, agents: list, chapter_idx: int) -> str:
+        """从 Kuzu 查询角色最后已知行动，构建连续性约束。"""
+        if graph is None:
+            return ""
+        lines = []
+        for a in agents:
+            try:
+                events = graph.get_recent_events_for_agent(a.entity_id, last_n=1)
+            except Exception:
+                continue
+            if events:
+                last = events[0]
+                lines.append(f"{a.name}：第{last['round']}轮执行了{last['action']}")
+        if not lines:
+            return ""
+        return (
+            "【角色连续性约束 — 请确保角色的声称为、行动与其最后已知状态一致，"
+            "不要写已死亡的角色以活人身份出现】\n"
+            + "\n".join(f"- {l}" for l in lines)
+        )
+
     async def _render_prose(self, report_payload: dict[str, Any]) -> None:
         """文学模式 Phase 5：逐章生成正文并落盘，计算提纲对齐。"""
         import re as _re
@@ -580,6 +612,22 @@ class DeductionOrchestrator:
 
                 # 构建累积剧情上下文
                 story_ctx = build_story_context(story_state, i)
+                # 构建 Kuzu 连续性约束：阻止死而复生等矛盾
+                continuity = _build_continuity_ctx(self.graph, self._agents, i)
+                if continuity:
+                    story_ctx = continuity + "\n\n" + story_ctx
+
+                # 构建 LanceDB 风格锚点
+                style_anchors = ""
+                if self._preprocessor is not None:
+                    try:
+                        anchors = _retrieve_style_anchors(
+                            self._preprocessor, self.session.source_material)
+                        if anchors:
+                            style_anchors = "【文笔锚点 — 参考以下原文笔法】\n" + "\n---\n".join(
+                                a[:300] for a in anchors[:3])
+                    except Exception:
+                        pass
 
                 text = await renderer.render_chapter(
                     chapter_idx=i, total_chapters=n,
@@ -589,6 +637,7 @@ class DeductionOrchestrator:
                     outline_event=outline_event, target_words=per_ch,
                     chapter_context=chapter_ctx,
                     story_context=story_ctx,
+                    style_anchors=style_anchors,
                 )
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 path = _write(fname, text)
@@ -600,6 +649,16 @@ class DeductionOrchestrator:
                     prev_tail = text[-600:]
                     # 更新累积剧情状态，供下一章参考
                     append_chapter_summary(story_state, i, text, states)
+                    # 持久化故事状态到 SQLite，暂停/重启不丢失
+                    try:
+                        data = self.store.get(self.session.id)
+                        cfg = (data or {}).get("config_json", {}) or {}
+                        if isinstance(cfg, str):
+                            cfg = _json.loads(cfg)
+                        cfg["story_state"] = story_state
+                        self.store.update(self.session.id, config_json=_json.dumps(cfg, ensure_ascii=False))
+                    except Exception:
+                        pass
                 else:
                     full_parts.append(f"第{i}章\n\n（正文生成失败，详细摘要见文件 {fname}）")
                 self._log("report", f"第{i}/{n}章已生成并保存（{len(text)} 字）→ {fname}")

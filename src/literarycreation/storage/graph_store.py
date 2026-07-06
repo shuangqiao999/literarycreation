@@ -238,12 +238,13 @@ class DeductionGraphStore:
         """查询某智能体最近 N 条事件（按轮次倒序），用于增强角色自我记忆。"""
         rows = self.query(
             f"MATCH (a:{self.AGENT_TABLE} {{id: $aid}})-[:ACTED]->(ev:{self.EVENT_TABLE}) "
-            "RETURN ev.round, ev.event_type, ev.description, ev.driver "
+            "RETURN ev.round, ev.event_type, ev.description, ev.driver, ev.effect "
             f"ORDER BY ev.round DESC LIMIT {int(last_n)}",
             {"aid": agent_id},
         )
         return [{"round": r[0] if r[0] is not None else 0, "action": r[1] or "",
-                 "description": (r[2] or "")[:300], "driver": r[3] or ""} for r in rows]
+                 "description": (r[2] or "")[:300], "driver": r[3] or "",
+                 "effect": r[4] or ""} for r in rows]
 
     def get_recent_global_events(self, last_n: int = 5) -> list[dict[str, Any]]:
         """全局最近 N 条事件，替代内存中的 _event_history。"""

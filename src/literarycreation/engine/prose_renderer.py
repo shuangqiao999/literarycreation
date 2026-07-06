@@ -225,10 +225,12 @@ class ProseRenderer:
         target_words: int = 0,
         chapter_context: Any = None,
         story_context: str = "",
+        style_anchors: str = "",
     ) -> str:
         """逐章生成：生成第 chapter_idx 章正文。
 
         story_context: 累积的剧情摘要，注入 prompt 提供跨章连贯性。
+        style_anchors: LanceDB 检索的原文风格锚点片段。
         """
         states_txt = "\n".join(
             f"- {v.get('name', k)}：" + "，".join(
@@ -287,6 +289,9 @@ class ProseRenderer:
         # 在 prompt 中注入累积剧情上下文
         if story_context:
             prompt = story_context + "\n\n" + prompt
+        # 在 prompt 顶部注入文笔锚点
+        if style_anchors:
+            prompt = style_anchors + "\n\n" + prompt
 
         try:
             text = await _retry_prose(self._client, prompt, story_context, target_words, chapter_idx)
