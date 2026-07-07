@@ -370,7 +370,7 @@ class SimulationEngine:
                 vals = [e["metrics"].get(m, 0) for e in entities]
                 averages[m] = round(sum(vals) / len(vals), 1)
         # 结构化近期事件
-        recent = self._build_recent_context()
+        recent = self._build_recent_context_global()
         recent_structured: list[dict] = []
         if self.graph is not None:
             try:
@@ -446,6 +446,19 @@ class SimulationEngine:
             for e in public:
                 parts.append(f"[R{e.get('round',0)}] {e.get('agent_name','?')}: {e.get('content','')[:100]}")
         return "\n".join(parts) if parts else "（无近期事件）"
+
+    def _build_recent_context_global(self) -> str:
+        """全局近期事件（供 dashboard snapshot 等全局视图使用）。"""
+        if self.graph is None:
+            return "（无近期事件）"
+        try:
+            events = self.graph.get_recent_global_events(last_n=8)
+        except Exception:
+            return "（无近期事件）"
+        return "\n".join(
+            f"- [{e['round']}] {e['agent_name']}: {e['content'][:80]}"
+            for e in events
+        ) or "（无近期事件）"
 
     def _build_others_ctx(self, self_id: str, alive_agents: list) -> str:
         """角色感知到的其他角色状态 — 基于 Kuzu RELATES 过滤。
