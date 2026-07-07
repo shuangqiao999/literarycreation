@@ -357,11 +357,19 @@ class SimulationEngine:
             for m in metrics_list:
                 vals = [e["metrics"].get(m, 0) for e in entities]
                 averages[m] = round(sum(vals) / len(vals), 1)
+        # 结构化近期事件
         recent = self._build_recent_context()
+        recent_structured: list[dict] = []
+        if self.graph is not None:
+            try:
+                for e in self.graph.get_recent_global_events(last_n=8):
+                    recent_structured.append(e)
+            except Exception:
+                pass
         return {
             "round": round_number, "entity_count": len(self._states),
             "entities": entities, "averages": averages,
-            "recent": recent,
+            "recent": recent, "recent_structured": recent_structured,
         }
 
     async def _retrieve_memory(self, agent: Any, round_number: int) -> tuple[str, str, str]:

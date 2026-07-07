@@ -1097,83 +1097,105 @@ export default function App() {
                 <div style={{ padding: 16, color: "#cbd5e1", fontSize: 13, overflowY: "auto" }}>
                   {snapshot ? (
                     <>
-                      {/* ── 文本态势简报 ── */}
-                      <div style={{ marginBottom: 16, background: "#0f172a", borderRadius: 8, padding: 12, borderLeft: "3px solid #3b82f6" }}>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: "#60a5fa", marginBottom: 8 }}>
-                          📊 第 {snapshot.round || "?"} 轮态势简报
+                      {/* ── 情节推进 ── */}
+                      <div style={{ marginBottom: 14, background: "#0f172a", borderRadius: 8, padding: 12, borderLeft: "3px solid #a78bfa" }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: "#a78bfa", marginBottom: 8 }}>
+                          📖 第 {snapshot.round || "?"} 轮 · 情节推进
                         </div>
-                        {snapshot.alerts && snapshot.alerts.length > 0 && (
-                          <div style={{ marginBottom: 8 }}>
-                            {snapshot.alerts.map((a: any, i: number) => (
-                              <div key={i} style={{ color: a.severity === "critical" ? "#f87171" : "#f59e0b", fontSize: 13, marginBottom: 2 }}>
-                                {a.severity === "critical" ? "🔴" : "🟡"} {a.entity}: {a.metric}={a.value} (阈值={a.threshold})
-                              </div>
-                            ))}
-                          </div>
+                        {snapshot.recent_structured && snapshot.recent_structured.length > 0 ? (
+                          snapshot.recent_structured.map((r: any, i: number) => (
+                            <div key={i} style={{ fontSize: 12, color: "#94a3b8", marginBottom: 3, paddingLeft: 8, borderLeft: "2px solid #334155" }}>
+                              <span style={{ color: "#cbd5e1", fontWeight: 500 }}>{r.agent_name || "?"}</span>
+                              <span style={{ color: "#64748b", margin: "0 4px" }}>→</span>
+                              {r.action}
+                              {r.content && <span style={{ color: "#64748b", marginLeft: 4 }}>"{(r.content || "").slice(0, 80)}{(r.content || "").length > 80 ? "..." : ""}"</span>}
+                            </div>
+                          ))
+                        ) : (
+                          <div style={{ fontSize: 12, color: "#64748b" }}>等待首轮事件...</div>
                         )}
-                        {snapshot.recent && snapshot.recent.map((r: any, i: number) => (
-                          <div key={i} style={{ color: "#94a3b8", fontSize: 12, marginBottom: 1 }}>
-                            [{r.round}] {r.agent}: {r.action} → {r.content}
-                          </div>
-                        ))}
                       </div>
 
-                      {/* ── 阵营对比柱状图 ── */}
-                      {snapshot.groups && Object.keys(snapshot.groups).length > 0 && (
-                        <div style={{ marginBottom: 16 }}>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", marginBottom: 10, borderLeft: "3px solid #f59e0b", paddingLeft: 8 }}>阵营对比</div>
-                          {(() => {
-                            const groups = snapshot.groups as Record<string, any>;
-                            const allMetrics = new Set<string>();
-                            Object.values(groups).forEach(g => Object.keys(g.metrics || {}).forEach((m: string) => allMetrics.add(m)));
-                            const metricList = Array.from(allMetrics).slice(0, 8);
-                            const colors = ["#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#a78bfa", "#06b6d4"];
-                            const barH = 18; const gap = 4; const chartW = 500; const padR = 60; const padL = 100;
-                            const svgH = metricList.length * (barH * 5 + gap) + 30;
-                            const maxVal = Math.max(...Object.values(groups).flatMap((g: any) => Object.values(g.metrics || {}) as number[]), 0) || 100;
-                            return (
-                              <svg width={chartW + padL + padR} height={svgH} style={{ background: "#0f172a", borderRadius: 8 }}>
-                                {metricList.map((metric, mi) => {
-                                  const yBase = mi * (barH * 5 + gap) + 20;
-                                  return (
-                                    <g key={metric}>
-                                      <text x={padL - 8} y={yBase + barH * 2 + 4} textAnchor="end" fill="#94a3b8" fontSize={11}>{metric}</text>
-                                      {Object.entries(groups).map(([domain, gdata], di) => {
-                                        const val = (gdata as any).metrics?.[metric] || 0;
-                                        const w = Math.max(1, (val / maxVal) * chartW);
-                                        return (
-                                          <g key={domain}>
-                                            <rect x={padL} y={yBase + di * (barH + 2)} width={w} height={barH} fill={colors[di % colors.length]} rx={2} />
-                                            <text x={padL + w + 4} y={yBase + di * (barH + 2) + barH - 4} fill="#e2e8f0" fontSize={10}>{val}</text>
-                                          </g>
-                                        );
-                                      })}
-                                    </g>
-                                  );
-                                })}
-                                {/* Legend */}
-                                {Object.keys(groups).map((domain, di) => (
-                                  <g key={'leg-' + domain}>
-                                    <rect x={padL + di * 120} y={svgH - 20} width={10} height={10} fill={colors[di % colors.length]} rx={1} />
-                                    <text x={padL + di * 120 + 14} y={svgH - 10} fill="#94a3b8" fontSize={10}>{domain}({(groups[domain] as any).count || 0})</text>
-                                  </g>
-                                ))}
-                              </svg>
-                            );
-                          })()}
+                      {/* ── 角色弧光追踪 ── */}
+                      <div style={{ marginBottom: 14 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", marginBottom: 10, borderLeft: "3px solid #22c55e", paddingLeft: 8 }}>🎭 角色弧光追踪</div>
+                        {snapshot.entities && snapshot.entities.length > 0 ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {snapshot.entities.map((e: any) => {
+                              const metrics = e.metrics || {};
+                              const keys = Object.keys(metrics).slice(0, 4);
+                              return (
+                                <div key={e.name} style={{ background: "#0f172a", borderRadius: 6, padding: "8px 12px" }}>
+                                  <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>{e.name}</div>
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                    {keys.map((k: string) => {
+                                      const val = metrics[k] || 0;
+                                      const hue = k === "trust" || k === "affection" ? 200 : k === "tension" ? 0 : k === "power" ? 120 : 40;
+                                      const pct = Math.min(100, val);
+                                      return (
+                                        <div key={k} style={{ flex: "1 1 45%", minWidth: 120 }}>
+                                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 2 }}>
+                                            <span style={{ color: "#94a3b8" }}>{LIT_METRIC_CN[k] || k}</span>
+                                            <span style={{ color: "#cbd5e1", fontWeight: 600 }}>{val}</span>
+                                          </div>
+                                          <div style={{ height: 4, background: "#1e293b", borderRadius: 2, overflow: "hidden" }}>
+                                            <div style={{ height: "100%", width: `${pct}%`, background: `hsl(${hue},60%,50%)`, borderRadius: 2, transition: "width 0.5s" }} />
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 12, color: "#64748b" }}>等待角色数据...</div>
+                        )}
+                      </div>
+
+                      {/* ── 故事节奏 ── */}
+                      {snapshot.averages && Object.keys(snapshot.averages).length > 0 && (
+                        <div style={{ marginBottom: 14, background: "#0f172a", borderRadius: 8, padding: 12, borderLeft: "3px solid #f59e0b" }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: "#f59e0b", marginBottom: 8 }}>⏱ 故事节奏</div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 12 }}>
+                            {Object.entries(snapshot.averages).map(([k, v]: [string, any]) => (
+                              <span key={k} style={{ background: "#1e293b", borderRadius: 4, padding: "2px 8px", color: "#cbd5e1" }}>
+                                {LIT_METRIC_CN[k] || k}：{typeof v === 'number' ? v.toFixed(0) : v}
+                              </span>
+                            ))}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>
+                            全局均值 · 共 {snapshot.entity_count || 0} 个角色
+                          </div>
                         </div>
                       )}
 
-                      {/* ── 实体数量 ── */}
-                      {snapshot.entity_count != null && (
-                        <div style={{ fontSize: 12, color: "#64748b" }}>
-                          {snapshot.entity_count} 个存活实体
+                      {/* ── 已生成章节 ── */}
+                      {report?.chapters && report.chapters.length > 0 && (
+                        <div style={{ marginBottom: 14, background: "#0f172a", borderRadius: 8, padding: 12, borderLeft: "3px solid #3b82f6" }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: "#60a5fa", marginBottom: 8 }}>📄 已生成章节</div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, fontSize: 12 }}>
+                            {report.chapters.map((ch: any) => (
+                              <span key={ch.index} style={{ background: "#1e293b", borderRadius: 4, padding: "2px 8px", color: "#cbd5e1" }}>
+                                Ch{ch.index} {ch.words}字
+                              </span>
+                            ))}
+                          </div>
+                          {report.work_dir && (
+                            <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>
+                              📁 {report.work_dir}
+                            </div>
+                          )}
                         </div>
                       )}
                     </>
                   ) : (
                     <div style={{ color: "#64748b", textAlign: "center", paddingTop: 60 }}>
-                      {selected?.status ? (["simulating", "reporting", "complete"].includes(selected.status) ? "等待轮次数据..." : "推演启动后将显示实时态势") : "请先选择会话并启动推演"}
+                      {selected?.status === "complete" ? "✅ 创作已完成，请查看「作品」Tab"
+                        : selected?.status ? (["simulating", "reporting"].includes(selected.status) ? "⏳ 等待首轮创作数据..."
+                        : "创作启动后将显示实时态势")
+                        : "📌 请创建会话并启动创作"}
                     </div>
                   )}
                 </div>
