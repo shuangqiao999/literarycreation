@@ -155,7 +155,7 @@ class SimulationEngine:
             others = self._build_others_ctx(agent.entity_id, alive_agents)
             dyn, static, kuzu_self = await self._retrieve_memory(agent, round_number)
             rel_ctx = self._build_relation_context(agent.entity_id)
-            recent = self._build_recent_context()
+            recent = self._build_recent_context_for_agent(agent.entity_id)
 
             async with self._sem:
                 dec = await self.reasoner.reason_narrative(
@@ -178,6 +178,12 @@ class SimulationEngine:
             return dec
 
         decisions = [r for r in await asyncio.gather(*[_decide(a) for a in alive_agents]) if r is not None]
+        for j in range(1, len(decisions)):
+            prev = decisions[j - 1]
+            prev_agent = next((a for a in alive_agents if a.entity_id == prev.get("actor_id","")), None)
+            if prev_agent:
+                prev_ctx = f"[同轮前序] {prev_agent.name}刚刚决定：{prev.get('action_type','?')}"
+                decisions[j]["rationale"] = prev_ctx + "\n" + (decisions[j].get("rationale",""))
 
         return await self._apply_decisions(round_number, decisions, client, sim_round)
 
@@ -219,7 +225,7 @@ class SimulationEngine:
             others = self._build_others_ctx(agent.entity_id, alive_agents)
             dyn, static, kuzu_self = await self._retrieve_memory(agent, round_number)
             rel_ctx = self._build_relation_context(agent.entity_id)
-            recent = self._build_recent_context()
+            recent = self._build_recent_context_for_agent(agent.entity_id)
 
             async with self._sem:
                 dec = await self.reasoner.reason_quantified(
@@ -241,6 +247,12 @@ class SimulationEngine:
             return dec
 
         decisions = [r for r in await asyncio.gather(*[_decide(a) for a in alive_agents]) if r is not None]
+        for j in range(1, len(decisions)):
+            prev = decisions[j - 1]
+            prev_agent = next((a for a in alive_agents if a.entity_id == prev.get("actor_id","")), None)
+            if prev_agent:
+                prev_ctx = f"[同轮前序] {prev_agent.name}刚刚决定：{prev.get('action_type','?')}"
+                decisions[j]["rationale"] = prev_ctx + "\n" + (decisions[j].get("rationale",""))
 
         return await self._apply_decisions(round_number, decisions, client, sim_round)
 
@@ -411,21 +423,43 @@ class SimulationEngine:
                 pass
         return (dyn or "（无近期动态事件）"), (static or "（无原著参考）"), kuzu_self
 
-    def _build_recent_context(self) -> str:
-        """近期全局事件 → 替代内存中的 _event_history。"""
+    def _build_recent_context_for_agent(self, agent_id: str) -> str:
+        """近期事件 — 仅角色自身事件 + 公开事件，过滤他人隐私。"""
         if self.graph is None:
             return "（无近期事件）"
         try:
-            events = self.graph.get_recent_global_events(last_n=5)
+            own = self.graph.get_recent_events_for_agent(agent_id, last_n=3)
+            global_ev = self.graph.get_recent_global_events(last_n=3)
         except Exception:
             return "（无近期事件）"
-        return "\n".join(
-            f"- [{e['round']}] {e['agent_name']}: {e['content'][:80]}"
-            for e in events
-        ) or "（无近期事件）"
+        parts = []
+        if own:
+            parts.append("【你最近做的事】")
+            for e in own:
+                base = f"[R{e['round']}] {e['action']}: {e['description'][:100]}"
+                if e.get("effect"):
+                    base += f" → {e['effect']}"
+                parts.append(base)
+        public = [e for e in global_ev if any(kw in (e.get("content","") or "") for kw in ("死","杀","被捕","公开","通缉","诏狱","朝堂"))]
+        if public:
+            parts.append("【公开消息】")
+            for e in public:
+                parts.append(f"[R{e.get('round',0)}] {e.get('agent_name','?')}: {e.get('content','')[:100]}")
+        return "\n".join(parts) if parts else "（无近期事件）"
 
     def _build_others_ctx(self, self_id: str, alive_agents: list) -> str:
+        """角色感知到的其他角色状态 — 基于 Kuzu RELATES 过滤。
+
+        有关系边的角色展示详细信息，无关系的仅展示模糊感知。
+        """
         from .strategic_reasoner import _metrics_to_narrative
+        known_ids: set[str] = set()
+        if self.graph is not None:
+            try:
+                nb = self.graph.get_entity_neighbors(self_id)
+                known_ids = {n.get("id", "") for n in nb.get("neighbors", []) if n.get("id")}
+            except Exception:
+                pass
         lines = []
         for a in alive_agents:
             if a.entity_id == self_id:
@@ -433,7 +467,11 @@ class SimulationEngine:
             st = self._states.get(a.entity_id)
             if st is None:
                 continue
-            lines.append(_metrics_to_narrative(st))
+            if a.entity_id in known_ids:
+                lines.append(_metrics_to_narrative(st))
+            else:
+                name = st.name if hasattr(st, "name") else a.entity_id[:8]
+                lines.append(f"{name}：你对此人了解有限，只能从公开行动中推测其状态。")
         return "\n".join(lines) or "（无其他参与方）"
 
     def _build_relation_context(self, entity_id: str) -> str:
