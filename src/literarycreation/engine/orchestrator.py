@@ -617,6 +617,20 @@ class DeductionOrchestrator:
                 if continuity:
                     story_ctx = continuity + "\n\n" + story_ctx
 
+                # P0+P2: 注入防重复上下文
+                from .prose_renderer import build_anti_repeat_context
+                anti_repeat = build_anti_repeat_context(story_state)
+                if anti_repeat:
+                    story_ctx = anti_repeat + "\n\n" + story_ctx
+
+                # P1: 注入角色人格 — 确保每个角色说话符合其性格
+                persona_lines = []
+                for a in (self._agents or []):
+                    persona_lines.append(f"- {a.name}（{a.persona[:60]}）")
+                if persona_lines:
+                    persona_ctx = "【角色语言特征 — 每个角色说话应符合其人格】\n" + "\n".join(persona_lines)
+                    story_ctx = persona_ctx + "\n\n" + story_ctx
+
                 # 构建 LanceDB 风格锚点
                 style_anchors = ""
                 if self._preprocessor is not None:
@@ -649,6 +663,16 @@ class DeductionOrchestrator:
                     prev_tail = text[-600:]
                     # 更新累积剧情状态，供下一章参考
                     append_chapter_summary(story_state, i, text, states)
+                    # P0: 记录文本指纹 + P2: 标注已使用场景
+                    try:
+                        from .prose_renderer import fingerprint_text
+                        fps = fingerprint_text(text)
+                        story_state.setdefault("used_fingerprints", []).extend(fps)
+                        syn = text[:120].replace("\n", " ")
+                        story_state.setdefault("used_scenes", "")
+                        story_state["used_scenes"] = story_state["used_scenes"][:1500] + f"\n第{i}章已写场景：{syn}"
+                    except Exception:
+                        pass
                     # 持久化故事状态到 SQLite，暂停/重启不丢失
                     try:
                         data = self.store.get(self.session.id)

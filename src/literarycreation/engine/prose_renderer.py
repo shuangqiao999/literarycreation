@@ -12,6 +12,24 @@ from ._utils import extract_text
 
 logger = logging.getLogger(__name__)
 
+# P4: 重复段落检测 — 检测连续相同句子数 >3 或 50字以上段落重复出现
+def _detect_repetition(text: str) -> bool:
+    sentences = [s.strip() for s in text.replace("\n", " ").split("。") if len(s.strip()) > 10]
+    if len(sentences) < 5:
+        return False
+    seen = set()
+    repeat_count = 0
+    for s in sentences:
+        short = s[:40]  # 前40字做指纹
+        if short in seen:
+            repeat_count += 1
+        else:
+            repeat_count = 0
+            seen.add(short)
+        if repeat_count >= 3:
+            return True
+    return False
+
 # Style is now configured per rule pack, not hardcoded
 _DEFAULT_STYLE = "现实主义"
 
@@ -89,6 +107,10 @@ async def _retry_prose(client, prompt, story_context, target_words, chapter_idx)
                                        system=sys, temperature=temp, **kwargs)
             text = extract_text(resp).strip()
             if text and len(text) > 80:
+                # P4: 重复段落检测 — 超过50字完全相同视为退化输出
+                if _detect_repetition(text) and idx < len(strategies) - 1:
+                    logger.info("[ProseRenderer] 第%d章第%d次重试检测到重复，跳过", chapter_idx, idx + 1)
+                    continue
                 if idx > 0:
                     logger.info("[ProseRenderer] 第%d章在第%d次重试成功", chapter_idx, idx + 1)
                 return text
@@ -204,6 +226,50 @@ def append_chapter_summary(story_state: dict, chapter_idx: int,
             story_state["resolved_plots"].append(f"✓ {q} → 本章已解答")
 
 
+# ── P0: 文本指纹去重 ──
+
+def fingerprint_text(text: str, top_n: int = 5) -> list[str]:
+    """提取关键句的短哈希作为文本指纹，用于跨章去重检测。"""
+    sentences = [s.strip() for s in text.replace("\n", " ").split("。") if len(s.strip()) > 15]
+    scored = []
+    for s in sentences:
+        score = 0
+        if any(v in s for v in ("决定", "发现", "原来", "终于", "必须", "不能")):
+            score += 1
+        scored.append((score, s))
+    scored.sort(key=lambda x: -x[0])
+    import hashlib
+    return [hashlib.md5(s[1].encode()).hexdigest()[:8] for s in scored[:top_n]]
+
+
+def build_anti_repeat_context(story_state: dict) -> str:
+    """检查已用文本指纹，构建防重复警告。"""
+    used = story_state.get("used_fingerprints", [])
+    used_scenes = story_state.get("used_scenes", "")
+    if not used and not used_scenes:
+        return ""
+    parts = ["【禁止重复 — 以下内容已在前面章节出现过，请勿再次写出相同或高度相似的场景】"]
+    if used_scenes:
+        parts.append(used_scenes)
+    return "\n".join(parts)
+
+
+# ── P3: 风格守卫 ──
+
+STYLE_GUARDS: dict[str, str] = {
+    "悬疑": "保持克制的叙事风格。避免超自然元素（如迷魂阵、墨色虚空、神识碎片）。"
+           "所有现象必须有现实逻辑解释。主角的推理应基于物证和观察，而非灵力感知。",
+    "史诗": "使用宏大叙事视角，描写要有命运感、史诗感。"
+          "战斗描写可以激烈但避免修仙式打斗，保持历史的厚重感。",
+    "现实主义": "强调真实可信。角色行为要有心理依据，社会背景要符合史实。"
+              "避免巧合和天降奇兵，所有转折应有铺垫。",
+    "浪漫主义": "情感描写可以浓烈，场景可以有诗意化的处理。"
+              "角色之间的情感纠葛是推动主线的重要力量。",
+    "宫廷剧": "聚焦权力博弈。对话要有潜台词，每个角色的言行都要考虑政治后果。"
+            "宫廷礼仪和等级制度要严格遵守。",
+}
+
+
 class ProseRenderer:
     """散文渲染器：量化推演结果 → 文学正文。"""
 
@@ -295,6 +361,10 @@ class ProseRenderer:
         # 在 prompt 中注入累积剧情上下文
         if story_context:
             prompt = story_context + "\n\n" + prompt
+        # P3: 注入风格守卫
+        style_guard = STYLE_GUARDS.get(self.style, "")
+        if style_guard:
+            prompt = f"【风格约束 — 确保本章符合{self.style}风格要求】\n{style_guard}\n\n{prompt}"
         # 在 prompt 顶部注入文笔锚点
         if style_anchors:
             prompt = style_anchors + "\n\n" + prompt
