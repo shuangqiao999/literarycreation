@@ -613,7 +613,7 @@ class DeductionOrchestrator:
                 # 构建累积剧情上下文
                 story_ctx = build_story_context(story_state, i)
                 # 构建 Kuzu 连续性约束：阻止死而复生等矛盾
-                continuity = _build_continuity_ctx(self.graph, self._agents, i)
+                continuity = self._build_continuity_ctx(self.graph, self._agents, i)
                 if continuity:
                     story_ctx = continuity + "\n\n" + story_ctx
 
@@ -621,7 +621,7 @@ class DeductionOrchestrator:
                 style_anchors = ""
                 if self._preprocessor is not None:
                     try:
-                        anchors = _retrieve_style_anchors(
+                        anchors = self._retrieve_style_anchors(
                             self._preprocessor, self.session.source_material)
                         if anchors:
                             style_anchors = "【文笔锚点 — 参考以下原文笔法】\n" + "\n---\n".join(
