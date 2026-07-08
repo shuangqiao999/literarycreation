@@ -60,6 +60,8 @@ class DeductionOrchestrator:
         self._style: str = "现实主义"
         self._outline: dict[str, Any] | None = None
         self._target_words: int = 0
+        self._canon_retries: int = 2
+        self._auto_blueprint: bool = True
 
     async def run(self) -> DeductionSession:
         import time as _time
@@ -83,6 +85,7 @@ class DeductionOrchestrator:
                 for phase_name, phase_fn in [
                     ("ontology", self._phase1_ontology),
                     ("quantify", self._phase1_5_quantify),
+                    ("blueprint", self._phase1_6_blueprint),
                     ("graph", self._phase2_graph),
                     ("agents", self._phase3_agents),
                 ]:
@@ -174,6 +177,11 @@ class DeductionOrchestrator:
             self._target_words = int(cfg.get("target_words", 0) or 0)
         except (TypeError, ValueError):
             self._target_words = 0
+        self._auto_blueprint = bool(cfg.get("auto_blueprint", True))
+        try:
+            self._canon_retries = max(0, int(cfg.get("canon_retries", 2)))
+        except (TypeError, ValueError):
+            self._canon_retries = 2
 
         # 2. 恢复规则包
         domain = (cfg.get("domain") or "").strip()
@@ -270,6 +278,11 @@ class DeductionOrchestrator:
             self._target_words = int(cfg.get("target_words", 0) or 0)
         except (TypeError, ValueError):
             self._target_words = 0
+        self._auto_blueprint = bool(cfg.get("auto_blueprint", True))
+        try:
+            self._canon_retries = max(0, int(cfg.get("canon_retries", 2)))
+        except (TypeError, ValueError):
+            self._canon_retries = 2
 
         domain = (cfg.get("domain") or "literary_realism").strip()
         from .rule_engine import RuleEngine
@@ -280,6 +293,51 @@ class DeductionOrchestrator:
             logger.warning("[Orchestrator] 规则包加载失败: %s", e)
             self._rule_engine = None
             self._log("quantify", f"规则包加载失败: {e}")
+
+    async def _phase1_6_blueprint(self) -> None:
+        """阶段1.6：故事蓝图生成。
+
+        无 outline（或缺 key_events）且 auto_blueprint 开启时，用 LLM 生成结构化大纲
+        并写回 config_json['outline']；已有大纲则尊重人工输入；生成失败安全降级 freeform。
+        """
+        _current_phase.set("blueprint")
+        self._check_cancel()
+        self.store.update(self.session.id,
+                          status=SessionStatus.BLUEPRINT_RUNNING.value,
+                          phase=DeductionPhase.BLUEPRINT.value)
+
+        existing = self._outline
+        if existing and existing.get("key_events"):
+            self._log("blueprint", "阶段1.6: 已提供人工大纲，跳过自动生成")
+            return
+        if not self._auto_blueprint:
+            self._log("blueprint", "阶段1.6: 自动大纲已禁用，进入自由续写模式")
+            return
+
+        data = self.store.get(self.session.id)
+        cfg = (data or {}).get("config_json", {}) or {}
+        if isinstance(cfg, str):
+            cfg = _json.loads(cfg)
+        domain = (cfg.get("domain") or "literary_realism").strip()
+
+        from .blueprint import generate_blueprint
+        self._log("blueprint", "阶段1.6: 故事蓝图生成开始")
+        blueprint = await generate_blueprint(
+            self.session.source_material,
+            domain=domain,
+            total_rounds=self.session.total_rounds,
+            target_words=self._target_words,
+            log_fn=self._log,
+        )
+        if not blueprint:
+            self._log("blueprint", "阶段1.6: 未生成有效大纲，降级为自由续写模式")
+            return
+
+        self._outline = blueprint
+        cfg["outline"] = blueprint
+        self.store.update(self.session.id,
+                          config_json=_json.dumps(cfg, ensure_ascii=False))
+        self._log("blueprint", "阶段1.6: 故事蓝图已写入会话配置，将按蓝图执行写作")
 
     async def _phase2_graph(self) -> None:
         _current_phase.set("graph")
@@ -537,6 +595,7 @@ class DeductionOrchestrator:
         from literarycreation.core.config import config as _cfg
 
         from .prose_renderer import ProseRenderer, build_story_context, append_chapter_summary
+        from .canon import CanonLedger
 
         rounds = list(getattr(self, "_simulation_rounds", []))
         style = getattr(self, "_style", "现实主义")
@@ -593,6 +652,8 @@ class DeductionOrchestrator:
             full_parts.append(prose)
         else:
             story_state = {}  # 累积剧情状态
+            canon = CanonLedger.from_state(story_state, blueprint=outline)
+            alive_checker = (lambda st: self._rule_engine.is_alive(st)) if self._rule_engine else None
             for i, rnd in enumerate(rounds, 1):
                 self._check_cancel()
                 events = [act.content for act in rnd.actions if getattr(act, "content", "")]
@@ -632,10 +693,27 @@ class DeductionOrchestrator:
                     story_ctx = persona_ctx + "\n\n" + story_ctx
 
                 # P5: 叙事阶段动态匹配 — 根据章号在总章数中的比例注入指导
-                from .prose_renderer import get_technique, build_phrase_hint
-                technique = get_technique(i, n)
+                from .prose_renderer import (
+                    build_phrase_hint,
+                    build_pov_text,
+                    build_reveal_text,
+                    get_technique,
+                    pov_allows_switch,
+                )
+                technique = get_technique(i, n, allow_pov_switch=pov_allows_switch(outline))
                 if technique:
                     story_ctx = f"【本章叙事技巧指导】{technique}\n\n" + story_ctx
+
+                # 正典一致性约束 + POV 锁定 + 揭示层级（蓝图守卫）
+                canon_ctx = canon.build_constraint_text(current_round=i)
+                if canon_ctx:
+                    story_ctx = canon_ctx + "\n\n" + story_ctx
+                pov_ctx = build_pov_text(outline)
+                if pov_ctx:
+                    story_ctx = pov_ctx + "\n\n" + story_ctx
+                reveal_ctx = build_reveal_text(outline, i)
+                if reveal_ctx:
+                    story_ctx = reveal_ctx + "\n\n" + story_ctx
 
                 # P6: 短语避重 — 统计已出现的高频短语并注入提示
                 phrase_hint = build_phrase_hint(story_state)
@@ -664,6 +742,39 @@ class DeductionOrchestrator:
                     story_context=story_ctx,
                     style_anchors=style_anchors,
                 )
+
+                # 正典一致性校验 → 冲突则自动重写本章（最多 self._canon_retries 次）
+                is_fallback = "正文生成失败" in text[:50]
+                if not is_fallback and self._canon_retries > 0:
+                    attempt = 0
+                    conflicts = canon.validate(text, current_round=i)
+                    while conflicts and attempt < self._canon_retries:
+                        attempt += 1
+                        self._log("report",
+                                  f"第{i}章检测到 {len(conflicts)} 处正典冲突，第 {attempt} 次自动重写")
+                        fix_ctx = ("【一致性修正 — 上一稿存在下列冲突，请重写本章以彻底消除，"
+                                   "不得保留矛盾情节】\n"
+                                   + "\n".join(f"- {c}" for c in conflicts)
+                                   + "\n\n" + story_ctx)
+                        text = await renderer.render_chapter(
+                            chapter_idx=i, total_chapters=n,
+                            seed_text=self.session.source_material,
+                            round_events=events, round_narration=narration,
+                            round_states=states, prev_tail=prev_tail,
+                            outline_event=outline_event, target_words=per_ch,
+                            chapter_context=chapter_ctx,
+                            story_context=fix_ctx,
+                            style_anchors=style_anchors,
+                        )
+                        is_fallback = "正文生成失败" in text[:50]
+                        if is_fallback:
+                            break
+                        conflicts = canon.validate(text, current_round=i)
+                    if conflicts:
+                        self._log("report",
+                                  f"第{i}章仍存在 {len(conflicts)} 处正典冲突（已达重写上限），保留当前稿并记录警告")
+                        logger.warning("[Orchestrator] 第%d章未消除的正典冲突: %s", i, conflicts)
+
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 path = _write(fname, text)
                 chapters_meta.append({"index": i, "title": f"第{i}章", "file": fname, "words": len(text)})
@@ -674,6 +785,12 @@ class DeductionOrchestrator:
                     prev_tail = text[-600:]
                     # 更新累积剧情状态，供下一章参考
                     append_chapter_summary(story_state, i, text, states)
+                    # 登记正典事实（死亡/麦高芬取得）并持久化
+                    try:
+                        canon.establish_from_chapter(text, i, self._states, alive_checker)
+                        canon.save_into(story_state)
+                    except Exception:
+                        pass
                     # P0: 记录文本指纹 + P2: 标注已使用场景
                     try:
                         from .prose_renderer import fingerprint_text

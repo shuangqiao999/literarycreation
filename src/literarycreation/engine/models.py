@@ -10,6 +10,7 @@ from typing import Any
 
 class DeductionPhase(str, Enum):
     ONTOLOGY = "ontology"
+    BLUEPRINT = "blueprint"
     GRAPH = "graph"
     AGENTS = "agents"
     SIMULATION = "simulation"
@@ -21,6 +22,7 @@ class DeductionPhase(str, Enum):
 class SessionStatus(str, Enum):
     CREATED = "created"
     ONTOLOGY_RUNNING = "ontology_running"
+    BLUEPRINT_RUNNING = "blueprint_running"
     GRAPH_RUNNING = "graph_running"
     AGENTS_RUNNING = "agents_running"
     SIMULATING = "simulating"

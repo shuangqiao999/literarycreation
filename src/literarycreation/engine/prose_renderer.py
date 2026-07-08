@@ -54,17 +54,75 @@ NARRATIVE_PHASES: list[tuple[float, str, str]] = [
 ]
 
 
-def get_technique(chapter_idx: int, total_chapters: int) -> str:
-    """根据章号在总章数中的位置比例，动态匹配叙事阶段指导。"""
+def get_technique(chapter_idx: int, total_chapters: int, allow_pov_switch: bool = True) -> str:
+    """根据章号在总章数中的位置比例，动态匹配叙事阶段指导。
+
+    allow_pov_switch=False（单一主角视角）时，抑制一切"切换视角"类建议。
+    """
     fraction = chapter_idx / max(1, total_chapters)
     for limit, label, text in NARRATIVE_PHASES:
         if fraction <= limit:
             technique = f"[当前阶段：{label}，第{chapter_idx}/{total_chapters}章] {text}"
             # 长篇章(≥15章)在中间区域每3章注入多样性提示
-            if total_chapters >= 15 and 0.35 <= fraction <= 0.65 and chapter_idx % 3 == 0:
+            if (allow_pov_switch and total_chapters >= 15
+                    and 0.35 <= fraction <= 0.65 and chapter_idx % 3 == 0):
                 technique += "\n【多样性提示】本章尝试切换场景或视角，避免与前2章相同的叙事结构。"
+            if not allow_pov_switch:
+                technique += ("\n【视角约束】本作为单一主角视角，忽略上文任何"
+                              "“切换/配角视角”的建议；如需换气，用场景切换而非视角切换。")
             return technique
     return ""
+
+
+def build_pov_text(outline: dict[str, Any] | None) -> str:
+    """构建 POV 约束块。默认单一主角贴身视角。"""
+    if not outline:
+        return ""
+    pov = outline.get("pov") or {}
+    if not isinstance(pov, dict):
+        return ""
+    mode = str(pov.get("mode", "single")).lower()
+    anchor = str(pov.get("anchor", "") or "").strip()
+    if mode == "single" and anchor:
+        return (f"【视角锁定 — 全程第三人称贴身跟随主角「{anchor}」，"
+                f"不得切入其他角色的内心视角，不得用分节切换到他人独立视角】")
+    if mode == "single":
+        return "【视角锁定 — 全程单一主角第三人称贴身视角，不得切换到其他角色的内心视角】"
+    return ""
+
+
+def pov_allows_switch(outline: dict[str, Any] | None) -> bool:
+    """是否允许配角/多视角切换（默认否——单一视角）。"""
+    if not outline:
+        return True  # 无大纲时维持原有自由行为
+    pov = outline.get("pov") or {}
+    if not isinstance(pov, dict):
+        return True
+    return str(pov.get("mode", "single")).lower() == "multi"
+
+
+def build_reveal_text(outline: dict[str, Any] | None, chapter_idx: int) -> str:
+    """按揭示节奏表，构建本章"信息层级"约束，防止提前泄底。"""
+    if not outline:
+        return ""
+    sched = outline.get("reveal_schedule") or []
+    cur = None
+    for e in sched:
+        if not isinstance(e, dict):
+            continue
+        try:
+            if int(e.get("round", 0)) == chapter_idx:
+                cur = e
+                break
+        except (TypeError, ValueError):
+            continue
+    if cur is None:
+        return ""
+    reveals = str(cur.get("reveals", cur.get("reveal", "")) or "").strip()
+    if not reveals:
+        return ""
+    return (f"【本章揭示层级 — 本章只能揭示到：{reveals}。"
+            f"严禁提前泄露后续章节才应揭晓的真相】")
 
 
 # ── P6: 短语追踪 ──
