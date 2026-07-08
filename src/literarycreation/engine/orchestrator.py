@@ -631,9 +631,9 @@ class DeductionOrchestrator:
                     persona_ctx = "【角色语言特征 — 每个角色说话应符合其人格】\n" + "\n".join(persona_lines)
                     story_ctx = persona_ctx + "\n\n" + story_ctx
 
-                # P5: 叙事技巧轮换 — 每章注入不同的叙事要求
-                from .prose_renderer import NARRATIVE_TECHNIQUES, build_phrase_hint
-                technique = NARRATIVE_TECHNIQUES.get(i, "")
+                # P5: 叙事阶段动态匹配 — 根据章号在总章数中的比例注入指导
+                from .prose_renderer import get_technique, build_phrase_hint
+                technique = get_technique(i, n)
                 if technique:
                     story_ctx = f"【本章叙事技巧指导】{technique}\n\n" + story_ctx
 
