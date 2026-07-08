@@ -101,7 +101,12 @@ class EventScheduler:
 
             for c in chars:
                 init = {k: float(v) for k, v in (c.get("initial_state") or {}).items()}
-                final_s = {k: float(v) for k, v in (c.get("final_state") or {}).items()}
+                final_s = {}
+                for k, v in (c.get("final_state") or {}).items():
+                    try:
+                        final_s[k] = float(v)
+                    except (ValueError, TypeError):
+                        pass
                 for key in set(init) | set(final_s):
                     iv = init.get(key, 50.0)
                     fv = final_s.get(key, iv)

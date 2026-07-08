@@ -438,10 +438,16 @@ class DeductionOrchestrator:
                 for a in self._agents:
                     spec = char_map.get(a.name)
                     if spec and spec.get("initial_state"):
-                        states[a.entity_id].metrics.update({
-                            k: float(v) for k, v in spec["initial_state"].items()
-                            if k in metric_set
-                        })
+                        for k, v in spec["initial_state"].items():
+                            if k not in metric_set:
+                                continue
+                            try:
+                                states[a.entity_id].metrics[k] = float(v)
+                            except (ValueError, TypeError):
+                                logger.warning(
+                                    "[Orchestrator] 角色 %s 的 %s 值非数字，跳过: %s",
+                                    a.name, k, v,
+                                )
                         seeded += 1
                 if seeded:
                     self._log("simulation", f"提纲复现：按角色初值覆盖 {seeded} 个实体")
@@ -841,11 +847,15 @@ class DeductionOrchestrator:
                 st = name_to_state.get(c.get("name"))
                 if st is None or not c.get("final_state"):
                     continue
-                res = self._rule_engine.judge(st, {"metrics": c["final_state"]})
-                arc.append({"name": c["name"], "win_score": res["win_score"],
-                            "final_metrics": {k: round(st.get_metric(k), 1)
-                                              for k in c["final_state"]},
-                            "target": c["final_state"]})
+                try:
+                    res = self._rule_engine.judge(st, {"metrics": c["final_state"]})
+                    arc.append({"name": c["name"], "win_score": res["win_score"],
+                                "final_metrics": {k: round(st.get_metric(k), 1)
+                                                  for k in c["final_state"]},
+                                "target": c["final_state"]})
+                except (ValueError, TypeError) as e:
+                    logger.warning("[Orchestrator] 弧光对齐跳过 %s（final_state 值非法）: %s",
+                                   c.get("name"), e)
             report_payload["arc_alignment"] = arc
             report_payload["key_events_plan"] = outline.get("key_events", [])
         self._log("report", f"文学正文完成：{len(chapters_meta)} 章，共 {len(prose)} 字，已保存至 {work_dir}")
