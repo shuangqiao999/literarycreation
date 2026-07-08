@@ -631,6 +631,17 @@ class DeductionOrchestrator:
                     persona_ctx = "【角色语言特征 — 每个角色说话应符合其人格】\n" + "\n".join(persona_lines)
                     story_ctx = persona_ctx + "\n\n" + story_ctx
 
+                # P5: 叙事技巧轮换 — 每章注入不同的叙事要求
+                from .prose_renderer import NARRATIVE_TECHNIQUES, build_phrase_hint
+                technique = NARRATIVE_TECHNIQUES.get(i, "")
+                if technique:
+                    story_ctx = f"【本章叙事技巧指导】{technique}\n\n" + story_ctx
+
+                # P6: 短语避重 — 统计已出现的高频短语并注入提示
+                phrase_hint = build_phrase_hint(story_state)
+                if phrase_hint:
+                    story_ctx = phrase_hint + "\n\n" + story_ctx
+
                 # 构建 LanceDB 风格锚点
                 style_anchors = ""
                 if self._preprocessor is not None:
@@ -671,6 +682,12 @@ class DeductionOrchestrator:
                         syn = text[:120].replace("\n", " ")
                         story_state.setdefault("used_scenes", "")
                         story_state["used_scenes"] = story_state["used_scenes"][:1500] + f"\n第{i}章已写场景：{syn}"
+                        # P6: 追踪高频短语
+                        from .prose_renderer import track_repeated_phrases
+                        new_phrases = track_repeated_phrases(text)
+                        existing = set(story_state.get("tracked_phrases", []))
+                        existing.update(new_phrases)
+                        story_state["tracked_phrases"] = list(existing)[:8]
                     except Exception:
                         pass
                     # 持久化故事状态到 SQLite，暂停/重启不丢失

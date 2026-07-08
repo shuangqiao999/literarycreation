@@ -30,6 +30,51 @@ def _detect_repetition(text: str) -> bool:
             return True
     return False
 
+# ── P5: 叙事技巧轮换 ──
+
+NARRATIVE_TECHNIQUES: dict[int, str] = {
+    1:  "本章为开篇，用环境描写建立氛围，通过具体的物证（而非陈述）引入核心悬疑。",
+    2:  "本章深入展开，通过对话暴露更多信息，主角面临第一个重要抉择。避免重复第一章的场景。",
+    3:  "本章可采用配角短暂POV（1-3段），展示故事的另一个侧面。然后切回主角视角继续推进。",
+    4:  "本章引入时间压力或外部威胁，提升节奏。主角的处境开始变得更加危险。",
+    5:  "本章为关键转折点，主角发现一个颠覆其认知的真相。此前建立的部分假设要被推翻。",
+    6:  "本章回归主角POV，但让主角开始质疑自己之前的判断。信息不对称开始成为张力来源。",
+    7:  "本章引入一个新角色、新线索或新场景，打破之前形成的平衡状态。",
+    8:  "本章加速节奏，多条线索开始交汇。减少内心独白，增加行动和对话。",
+    9:  "本章为高潮铺垫章，主角做出不可逆的决定。每个配角都要有自己的立场和动机。",
+    10: "本章为终章，不必收束所有线索。文学作品的尾声往往比高潮更有力量——用场景、意象或对话收束。",
+}
+
+
+# ── P6: 短语追踪 ──
+
+def track_repeated_phrases(text: str, top_n: int = 5) -> list[str]:
+    """提取高频4字短语用于注入避重提示。"""
+    import re
+    # 按标点和空格分段，避免跨句匹配
+    segments = re.split(r'[，。；：、！？\n\r]', text)
+    all_phrases: list[str] = []
+    for seg in segments:
+        seg = seg.strip()
+        if len(seg) < 4:
+            continue
+        # 滑动窗口提取4字短语
+        for i in range(len(seg) - 3):
+            all_phrases.append(seg[i:i+4])
+    if not all_phrases:
+        return []
+    from collections import Counter
+    c = Counter(all_phrases)
+    return [p for p, cnt in c.most_common(top_n) if cnt >= 2]
+
+
+def build_phrase_hint(story_state: dict) -> str:
+    """从累积文本中获取高频短语并构建避重提示。"""
+    all_phrases = story_state.get("tracked_phrases", [])
+    if not all_phrases:
+        return ""
+    return "[避免重复以下短语] " + "、".join(all_phrases[:5])
+
 # Style is now configured per rule pack, not hardcoded
 _DEFAULT_STYLE = "现实主义"
 
