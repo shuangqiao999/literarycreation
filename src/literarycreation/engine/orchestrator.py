@@ -61,6 +61,7 @@ class DeductionOrchestrator:
         self._outline: dict[str, Any] | None = None
         self._target_words: int = 0
         self._canon_retries: int = 2
+        self._scene_retries: int = 2
         self._auto_blueprint: bool = True
         self._style_mode: str = "manual"
         self._base_domain: str = "literary_realism"
@@ -728,6 +729,20 @@ class DeductionOrchestrator:
         seeds_ctx = build_scene_seeds_text(outline, i)
         if seeds_ctx:
             story_ctx = seeds_ctx + "\n\n" + story_ctx
+
+        # 角色轨迹：登场/退场提醒
+        traj_lines: list[str] = []
+        for c in (outline.get("characters") if outline else []) or []:
+            if not isinstance(c, dict):
+                continue
+            nm = c.get("name", "")
+            if c.get("first_appearance") == i:
+                traj_lines.append(f"本章引入角色「{nm}」，需交代其身份与来意")
+            if c.get("last_appearance") == i:
+                ex = c.get("exit", "") or "完成其使命"
+                traj_lines.append(f"角色「{nm}」将于本章完成弧光并有意义地退场（{ex}），不要让其无声消失")
+        if traj_lines:
+            story_ctx = "【角色轨迹】\n" + "\n".join(f"- {t}" for t in traj_lines) + "\n\n" + story_ctx
         # 高潮推进（仅在本章无强制事件时注入）
         if self._climax_driver is not None and not outline_event:
             climax_ctx = self._climax_driver.build_text(i, canon, story_state)
@@ -770,8 +785,9 @@ class DeductionOrchestrator:
         per_ch: int,
         canon: Any,
         enforcer: Any,
+        story_state: dict[str, Any],
     ) -> str:
-        """渲染一章 → 正典校验重写 → 字数扩写。返回最终 text。"""
+        """渲染一章 → 正典校验重写 → 场景去重重写 → 字数扩写。返回最终 text。"""
         text = await renderer.render_chapter(
             chapter_idx=i, total_chapters=n,
             seed_text=self.session.source_material,
@@ -782,6 +798,18 @@ class DeductionOrchestrator:
             story_context=story_ctx,
             style_anchors=ci["style_anchors"],
         )
+
+        async def _rerender(fix_ctx: str) -> str:
+            return await renderer.render_chapter(
+                chapter_idx=i, total_chapters=n,
+                seed_text=self.session.source_material,
+                round_events=ci["events"], round_narration=ci["narration"],
+                round_states=ci["states"], prev_tail=prev_tail,
+                outline_event=ci["outline_event"], target_words=per_ch,
+                chapter_context=ci["chapter_ctx"],
+                story_context=fix_ctx,
+                style_anchors=ci["style_anchors"],
+            )
 
         is_fallback = "正文生成失败" in text[:50]
         # 正典一致性校验 → 冲突则自动重写
@@ -796,16 +824,7 @@ class DeductionOrchestrator:
                            "不得保留矛盾情节】\n"
                            + "\n".join(f"- {c}" for c in conflicts)
                            + "\n\n" + story_ctx)
-                text = await renderer.render_chapter(
-                    chapter_idx=i, total_chapters=n,
-                    seed_text=self.session.source_material,
-                    round_events=ci["events"], round_narration=ci["narration"],
-                    round_states=ci["states"], prev_tail=prev_tail,
-                    outline_event=ci["outline_event"], target_words=per_ch,
-                    chapter_context=ci["chapter_ctx"],
-                    story_context=fix_ctx,
-                    style_anchors=ci["style_anchors"],
-                )
+                text = await _rerender(fix_ctx)
                 is_fallback = "正文生成失败" in text[:50]
                 if is_fallback:
                     break
@@ -814,6 +833,29 @@ class DeductionOrchestrator:
                 self._log("report",
                           f"第{i}章仍存在 {len(conflicts)} 处正典冲突（已达重写上限），保留当前稿并记录警告")
                 logger.warning("[Orchestrator] 第%d章未消除的正典冲突: %s", i, conflicts)
+
+        # 场景去重（独立于正典的重写预算）
+        is_fallback = "正文生成失败" in text[:50]
+        if not is_fallback and self._scene_retries > 0:
+            s_attempt = 0
+            scene_conflicts = canon.detect_scene_repetition(text, i, story_state)
+            while scene_conflicts and s_attempt < self._scene_retries:
+                s_attempt += 1
+                self._log("report",
+                          f"第{i}章场景与历史章节雷同，第 {s_attempt} 次改写")
+                fix_ctx = ("【场景去重 — 本章与已写章节场景高度雷同，请改写为推进剧情的全新场景，"
+                           "不要重复开场/地点/动作】\n"
+                           + "\n".join(f"- {c}" for c in scene_conflicts)
+                           + "\n\n" + story_ctx)
+                text = await _rerender(fix_ctx)
+                is_fallback = "正文生成失败" in text[:50]
+                if is_fallback:
+                    break
+                scene_conflicts = canon.detect_scene_repetition(text, i, story_state)
+            if scene_conflicts:
+                self._log("report",
+                          f"第{i}章场景重复未消除（已达改写上限），保留当前稿")
+                logger.warning("[Orchestrator] 第%d章场景重复: %s", i, scene_conflicts)
 
         # 字数硬约束
         is_fallback = "正文生成失败" in text[:50]
@@ -854,6 +896,7 @@ class DeductionOrchestrator:
         append_chapter_summary(story_state, i, text, states)
         try:
             canon.establish_from_chapter(text, i, self._states, alive_checker)
+            canon.record_scene(text, i, story_state)
             canon.save_into(story_state)
         except Exception:
             pass
@@ -869,6 +912,9 @@ class DeductionOrchestrator:
             existing = set(story_state.get("tracked_phrases", []))
             existing.update(new_phrases)
             story_state["tracked_phrases"] = list(existing)[:8]
+            # 跨章整句/箴言重复追踪
+            from .prose_renderer import update_repeated_sentences
+            update_repeated_sentences(story_state, text)
         except Exception:
             pass
         try:
@@ -955,7 +1001,8 @@ class DeductionOrchestrator:
                     story_state=story_state, canon=canon, ev_by_round=ev_by_round)
                 text = await self._render_and_validate_chapter(
                     renderer=renderer, i=i, n=n, ci=ci, story_ctx=ci["story_ctx"],
-                    prev_tail=prev_tail, per_ch=per_ch, canon=canon, enforcer=enforcer)
+                    prev_tail=prev_tail, per_ch=per_ch, canon=canon, enforcer=enforcer,
+                    story_state=story_state)
 
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 _write(fname, text)

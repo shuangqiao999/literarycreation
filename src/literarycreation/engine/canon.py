@@ -69,6 +69,12 @@ class CanonLedger:
                         "acquired": False,
                         "acquired_round": 0,
                     }
+            # 播种"预设既定死亡"（故事开始前已死的角色，如师父）→ chapter=0
+            ef = blueprint.get("established_facts") or {}
+            for d in (ef.get("deaths") or []):
+                nm = str(d.get("name", "") or "").strip()
+                if nm and nm not in ledger.dead:
+                    ledger.dead[nm] = 0
         return ledger
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +98,12 @@ class CanonLedger:
                 f"以下角色已在前文死亡，本章【不得】让其以活人身份说话或行动"
                 f"（仅可出现在回忆、尸体、遗物或他人提及中）：{names}"
             )
+            pre_dead = [n for n, r in self.dead.items() if r == 0]
+            if pre_dead:
+                parts.append(
+                    "其中 " + "、".join(sorted(pre_dead)) + " 在故事开始前已死亡；"
+                    "其遗言/遗信/遗物只能作为「死前所留」出现，严禁作为当前对话或活人行动"
+                )
         for mid, m in self.macguffins.items():
             if m.get("acquired"):
                 parts.append(
@@ -211,3 +223,61 @@ class CanonLedger:
                         m["acquired"] = True
                         m["acquired_round"] = chapter_idx
                         break
+
+    # ── 场景重复检测 ──
+
+    @staticmethod
+    def _scene_features(text: str) -> dict[str, Any]:
+        """抽取场景特征：开场句指纹 + 动作动词集合 + 4字词集合（用于相似度比对）。"""
+        head = (text or "")[:400]
+        sentences = [s.strip() for s in re.split(r"[。！？\n]", head) if s.strip()]
+        opening = "".join(sentences[:2])
+        verbs = {v for v in _LIVING_VERBS + _ACQUIRE_VERBS if v in head}
+        # 4字滑窗特征词（取开头段落，代表"场景骨架"）
+        grams: set[str] = set()
+        for seg in re.split(r"[，。；：、！？\n]", head):
+            seg = seg.strip()
+            for i in range(max(0, len(seg) - 3)):
+                grams.add(seg[i:i + 4])
+        return {"opening": opening, "verbs": verbs, "grams": grams}
+
+    @staticmethod
+    def _scene_similarity(a: dict[str, Any], b: dict[str, Any]) -> float:
+        """两个场景特征的相似度（0-1）：4字词 Jaccard 为主，开场句完全相同则拔高。"""
+        ga, gb = set(a.get("grams") or []), set(b.get("grams") or [])
+        if not ga or not gb:
+            jac = 0.0
+        else:
+            inter = len(ga & gb)
+            union = len(ga | gb)
+            jac = inter / union if union else 0.0
+        if a.get("opening") and a.get("opening") == b.get("opening"):
+            return max(jac, 0.9)
+        return jac
+
+    def detect_scene_repetition(self, text: str, chapter_idx: int,
+                                story_state: dict[str, Any], threshold: float = 0.7) -> list[str]:
+        """检测本章场景是否与历史章节高度相似（>threshold）。返回冲突描述。"""
+        if not text:
+            return []
+        feats = self._scene_features(text)
+        conflicts: list[str] = []
+        for past in story_state.get("scene_features", []):
+            sim = self._scene_similarity(feats, past)
+            if sim >= threshold:
+                conflicts.append(
+                    f"本章场景与第{past.get('chapter')}章高度相似（相似度 {sim:.0%}），"
+                    f"请改写为推进剧情的【全新场景】，不要重复开场/地点/动作")
+        return conflicts
+
+    def record_scene(self, text: str, chapter_idx: int, story_state: dict[str, Any]) -> None:
+        """把本章场景特征存入 story_state（供后续章节比对）。集合转 list 以便 JSON 持久化。"""
+        f = self._scene_features(text)
+        story_state.setdefault("scene_features", []).append({
+            "chapter": chapter_idx,
+            "opening": f["opening"],
+            "verbs": sorted(f["verbs"]),
+            "grams": sorted(f["grams"])[:200],
+        })
+        # 上限保护
+        story_state["scene_features"] = story_state["scene_features"][-40:]

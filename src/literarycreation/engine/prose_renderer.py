@@ -190,9 +190,46 @@ def track_repeated_phrases(text: str, top_n: int = 5) -> list[str]:
 def build_phrase_hint(story_state: dict) -> str:
     """从累积文本中获取高频短语并构建避重提示。"""
     all_phrases = story_state.get("tracked_phrases", [])
-    if not all_phrases:
-        return ""
-    return "[避免重复以下短语] " + "、".join(all_phrases[:5])
+    parts = []
+    if all_phrases:
+        parts.append("[避免重复以下短语] " + "、".join(all_phrases[:5]))
+    # 整句/箴言避重
+    rep_sents = story_state.get("repeated_sentences", [])
+    if rep_sents:
+        parts.append("[以下句子已多次出现，严禁再原样使用，请换新表达] "
+                     + "；".join(s[:30] for s in rep_sents[:5]))
+    return "\n".join(parts)
+
+
+def track_repeated_sentences(text: str, threshold: int = 2) -> list[str]:
+    """检测本章内完全相同的完整句子（长度>15字，出现≥threshold次）。"""
+    from collections import Counter
+    sentences = [s.strip() for s in text.replace("\n", " ").split("。") if len(s.strip()) > 15]
+    counter = Counter(sentences)
+    return [s for s, cnt in counter.items() if cnt >= threshold]
+
+
+def update_repeated_sentences(story_state: dict, text: str, cross_threshold: int = 2) -> None:
+    """跨章累计整句出现次数，把出现≥cross_threshold章的句子写入 repeated_sentences。
+
+    解决"活着的人不会走死人的路"跨多章重复沦为口头禅的问题。
+    """
+    import re
+    counts: dict[str, int] = story_state.setdefault("sentence_counts", {})
+    seen_this_ch: set[str] = set()
+    for s in re.split(r"[。！？\n]", text):
+        s = s.strip()
+        if len(s) < 8 or s in seen_this_ch:
+            continue
+        seen_this_ch.add(s)
+        counts[s] = counts.get(s, 0) + 1
+    # 内存上限：超过 400 条时丢弃只出现 1 次的
+    if len(counts) > 400:
+        for k in [k for k, v in counts.items() if v <= 1]:
+            del counts[k]
+    story_state["repeated_sentences"] = sorted(
+        [s for s, c in counts.items() if c >= cross_threshold],
+        key=lambda s: -counts[s])[:8]
 
 # Style is now configured per rule pack, not hardcoded
 _DEFAULT_STYLE = "现实主义"
@@ -514,28 +551,61 @@ class ProseRenderer:
         if chapter_idx > 3:
             effective_seed = (seed_text or "")[:200] + "\n...（前文从略，仅作文笔参考）"
 
-        prompt = _CHAPTER_PROMPT.format(
-            idx=chapter_idx, total=total_chapters, style=self.style,
-            seed_text=effective_seed,
-            prev_tail=(prev_tail or "（本章为开篇）")[-600:],
-            states=states_txt, events=events_txt,
-            outline_block=(_OUTLINE_BLOCK if outline_event else ""),
-            length_req=length_req,
-        )
-        # 在 prompt 中注入累积剧情上下文
-        if story_context:
-            prompt = story_context + "\n\n" + prompt
-        # P3: 注入风格守卫
         style_guard = STYLE_GUARDS.get(self.style, "")
-        if style_guard:
-            prompt = f"【风格约束 — 确保本章符合{self.style}风格要求】\n{style_guard}\n\n{prompt}"
-        # 在 prompt 顶部注入文笔锚点
-        if style_anchors:
-            prompt = style_anchors + "\n\n" + prompt
+
+        def _compose(length_req_text: str, seg_prev_tail: str,
+                     seg_directive: str, seed_for_prompt: str) -> str:
+            p = _CHAPTER_PROMPT.format(
+                idx=chapter_idx, total=total_chapters, style=self.style,
+                seed_text=seed_for_prompt,
+                prev_tail=(seg_prev_tail or "（本章为开篇）")[-600:],
+                states=states_txt, events=events_txt,
+                outline_block=(_OUTLINE_BLOCK if outline_event else ""),
+                length_req=length_req_text,
+            )
+            ctx = story_context
+            if seg_directive:
+                ctx = (seg_directive + "\n\n" + ctx) if ctx else seg_directive
+            if ctx:
+                p = ctx + "\n\n" + p
+            if style_guard:
+                p = f"【风格约束 — 确保本章符合{self.style}风格要求】\n{style_guard}\n\n{p}"
+            if style_anchors:
+                p = style_anchors + "\n\n" + p
+            return p
 
         try:
-            text = await _retry_prose(self._client, prompt, story_context, target_words, chapter_idx)
-            return text
+            _SEG_SIZE = 2500
+            if target_words and target_words > _SEG_SIZE:
+                # 分段生成：每段约 2500 字，逐段承接拼接，稳定逼近目标字数
+                import math
+                k = min(8, max(2, math.ceil(target_words / _SEG_SIZE)))
+                seg_target = max(800, target_words // k)
+                parts: list[str] = []
+                seg_tail = prev_tail
+                for s in range(1, k + 1):
+                    if s == 1:
+                        directive = (f"【分段写作】本章共分 {k} 段，现在写【第 1 段】（约 {seg_target} 字）："
+                                     f"从本章开头写起，只写本章约前 1/{k}，自然停在可续接处，本段不要收尾。")
+                        seed_for = effective_seed
+                    else:
+                        tail_role = "本段需推进并【收束本章】。" if s == k else "只写本章中间的一部分，自然停在可续接处。"
+                        directive = (f"【分段写作】本章共分 {k} 段，现在写【第 {s} 段】（约 {seg_target} 字）："
+                                     f"紧接下方【上文结尾】继续写，严禁重复已写内容、严禁从头开场。{tail_role}")
+                        seed_for = (seed_text or "")[:150] + "\n...（仅作文笔参考，勿复述开头）"
+                    p = _compose(f"本段篇幅约 {seg_target} 字。", seg_tail, directive, seed_for)
+                    seg_text = await _retry_prose(self._client, p, story_context, seg_target, chapter_idx)
+                    if seg_text and "正文生成失败" not in seg_text[:20]:
+                        parts.append(seg_text.strip())
+                        seg_tail = seg_text[-400:]
+                text = "\n\n".join(parts)
+                if not text:
+                    raise ValueError("segmented render produced empty text")
+                logger.info("[ProseRenderer] 第%d章分 %d 段生成，合计 %d 字", chapter_idx, k, len(text))
+                return text
+
+            prompt = _compose(length_req, prev_tail, "", effective_seed)
+            return await _retry_prose(self._client, prompt, story_context, target_words, chapter_idx)
         except Exception as e:  # noqa: BLE001
             logger.warning("[ProseRenderer] 第%d章生成失败，降级摘要: %s", chapter_idx, e)
             lines = [f"【第{chapter_idx}章 · 正文生成失败，以下为本章摘要】", "", "角色状态：", states_txt, "", "情节：", events_txt]
