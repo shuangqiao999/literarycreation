@@ -169,7 +169,7 @@ export default function App() {
 
   // ── Settings ──
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"llm" | "embed">("llm");
+  const [settingsTab, setSettingsTab] = useState<"llm" | "embed" | "engine">("llm");
   const [cfgLLMBase, setCfgLLMBase] = useState("");
   const [cfgLLMKey, setCfgLLMKey] = useState("");
   const [cfgLLMModel, setCfgLLMModel] = useState("");
@@ -190,6 +190,11 @@ export default function App() {
 
   const EMBED_MODEL_KW = ["embed", "embedding", "bge", "e5", "gte", "stella", "nomic", "jina"];
 
+  // ── 引擎配置 ──
+  const [cfgMaxAgents, setCfgMaxAgents] = useState(10000);
+  const [cfgMaxConcurrent, setCfgMaxConcurrent] = useState(2);
+  const [cfgRetrieveTopK, setCfgRetrieveTopK] = useState(5);
+
   const fetchConfig = useCallback(async (): Promise<boolean> => {
     try {
       const [lr, er, pr] = await Promise.all([
@@ -200,6 +205,12 @@ export default function App() {
       if (lr) { setCfgLLMBase(lr.llm_base_url || ""); setCfgLLMKey(lr.llm_api_key || ""); setCfgLLMModel(lr.llm_model || ""); setCfgLLMProvider(lr.provider_slug || ""); setCfgLLMTemp(lr.llm_temperature || 0.3); }
       if (er) { setCfgEmbedBase(er.embedding_api_base || ""); setCfgEmbedKey(er.embedding_api_key || ""); setCfgEmbedModel(er.embedding_model_name || ""); setCfgEmbedProvider(er.provider_slug || ""); }
       if (pr) { setCfgProviders(pr.providers || []); }
+      const eng = await fetch(`${API_BASE}/config/engine`).then(r => r.ok ? r.json() : null);
+      if (eng) {
+        setCfgMaxAgents(eng.max_agents ?? 10000);
+        setCfgMaxConcurrent(eng.max_concurrent ?? 2);
+        setCfgRetrieveTopK(eng.retrieve_top_k ?? 5);
+      }
       return !!(pr && (pr.providers || []).length);
     } catch { return false; }
   }, []);
@@ -278,11 +289,16 @@ export default function App() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ embedding_api_base: cfgEmbedBase, embedding_api_key: cfgEmbedKey, embedding_model_name: cfgEmbedModel, provider_slug: cfgEmbedProvider }),
       });
+      await fetch(`${API_BASE}/config/engine`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_agents: cfgMaxAgents, max_concurrent: cfgMaxConcurrent, retrieve_top_k: cfgRetrieveTopK }),
+      });
       await fetchConfig();
       setShowSettings(false);
     } catch { /* ignore */ }
     setCfgSaving(false);
-  }, [cfgLLMBase, cfgLLMKey, cfgLLMModel, cfgLLMProvider, cfgLLMTemp, cfgEmbedBase, cfgEmbedKey, cfgEmbedModel, cfgEmbedProvider, fetchConfig]);
+  }, [cfgLLMBase, cfgLLMKey, cfgLLMModel, cfgLLMProvider, cfgLLMTemp, cfgEmbedBase, cfgEmbedKey, cfgEmbedModel, cfgEmbedProvider,
+      cfgMaxAgents, cfgMaxConcurrent, cfgRetrieveTopK, fetchConfig]);
 
   const fetchSessions = useCallback(async (): Promise<boolean> => {
     try {
@@ -1558,6 +1574,7 @@ export default function App() {
             <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
               <button onClick={() => setSettingsTab("llm")} style={{ flex: 1, padding: "6px 0", borderRadius: 6, border: "1px solid #334155", background: settingsTab === "llm" ? "#3b82f6" : "#0f172a", color: settingsTab === "llm" ? "#fff" : "#94a3b8", cursor: "pointer", fontSize: 13 }}>LLM 对话模型</button>
               <button onClick={() => setSettingsTab("embed")} style={{ flex: 1, padding: "6px 0", borderRadius: 6, border: "1px solid #334155", background: settingsTab === "embed" ? "#3b82f6" : "#0f172a", color: settingsTab === "embed" ? "#fff" : "#94a3b8", cursor: "pointer", fontSize: 13 }}>嵌入模型</button>
+              <button onClick={() => setSettingsTab("engine")} style={{ flex: 1, padding: "6px 0", borderRadius: 6, border: "1px solid #334155", background: settingsTab === "engine" ? "#3b82f6" : "#0f172a", color: settingsTab === "engine" ? "#fff" : "#94a3b8", cursor: "pointer", fontSize: 13 }}>引擎</button>
             </div>
 
             {settingsTab === "llm" ? (
@@ -1631,6 +1648,19 @@ export default function App() {
               </div>
             )}
             {settingsTab === "embed" && cfgEmbedModelError && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 12 }}>{cfgEmbedModelError}</div>}
+
+            {/* ── 引擎配置 Tab ── */}
+            {settingsTab === "engine" && (
+              <>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8", marginBottom: 8, borderLeft: "3px solid #f59e0b", paddingLeft: 8 }}>推演控制</div>
+                <label style={lbl}>最大智能体数 <span style={{ color: "#64748b" }}>— 从图谱生成的智能体数量上限</span></label>
+                <input style={inp} type="number" min={1} max={50000} value={cfgMaxAgents} onChange={e => setCfgMaxAgents(Math.max(1, Number(e.target.value) || 1))} />
+                <label style={lbl}>并发上限 <span style={{ color: "#64748b" }}>— 每轮同时发出的 LLM 请求数</span></label>
+                <input style={inp} type="number" min={1} max={16} value={cfgMaxConcurrent} onChange={e => setCfgMaxConcurrent(Math.max(1, Number(e.target.value) || 1))} />
+                <label style={lbl}>检索 Top-K <span style={{ color: "#64748b" }}>— 语义检索返回的文本片段数</span></label>
+                <input style={inp} type="number" min={1} max={30} value={cfgRetrieveTopK} onChange={e => setCfgRetrieveTopK(Math.max(1, Number(e.target.value) || 1))} />
+              </>
+            )}
 
             <button onClick={saveConfig} disabled={cfgSaving} style={{ ...btn, width: "100%", background: "#3b82f6", color: "#fff", height: 36, fontSize: 14 }}>
               {cfgSaving ? "保存中..." : "保存配置"}

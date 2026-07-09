@@ -44,13 +44,25 @@ class DeductionConfig:
     def __init__(self):
         self.project_root = _get_root()
         self.deduction_data_dir = _get_data_dir()
-        self.deduction_max_agents = int(os.getenv("FORGE_MAX_AGENTS", "10000"))
         self.deduction_default_rounds = int(os.getenv("FORGE_DEFAULT_ROUNDS", "10"))
         self.deduction_candidate_count = int(os.getenv("FORGE_CANDIDATE_COUNT", "3"))
         self.deduction_llm_temperature = float(os.getenv("FORGE_LLM_TEMPERATURE", "0.85"))
-        self.deduction_max_concurrent = int(os.getenv("FORGE_MAX_CONCURRENT", "2"))
-        self.deduction_retrieve_top_k = int(os.getenv("FORGE_RETRIEVE_TOP_K", "5"))
         self.deduction_similarity_threshold = float(os.getenv("FORGE_SIMILARITY_THRESHOLD", "0.4"))
+
+    @property
+    def deduction_max_agents(self) -> int:
+        from literarycreation.core.providers import registry
+        return int(registry._data.get("max_agents") or os.getenv("FORGE_MAX_AGENTS", "10000"))
+
+    @property
+    def deduction_max_concurrent(self) -> int:
+        from literarycreation.core.providers import registry
+        return int(registry._data.get("max_concurrent") or os.getenv("FORGE_MAX_CONCURRENT", "2"))
+
+    @property
+    def deduction_retrieve_top_k(self) -> int:
+        from literarycreation.core.providers import registry
+        return int(registry._data.get("retrieve_top_k") or os.getenv("FORGE_RETRIEVE_TOP_K", "5"))
 
     def __getattr__(self, name: str):
         return None

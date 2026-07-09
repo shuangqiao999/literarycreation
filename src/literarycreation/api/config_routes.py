@@ -83,6 +83,35 @@ async def update_embed(body: EmbedConfigUpdate):
     return {"status": "ok"}
 
 
+# ── Engine config ──
+
+class EngineConfigUpdate(BaseModel):
+    max_agents: int = 10000
+    max_concurrent: int = 2
+    retrieve_top_k: int = 5
+
+
+@router.get("/engine")
+async def get_engine_config():
+    from literarycreation.core.config import config as _cfg
+    d = registry._data
+    return {
+        "max_agents": int(d.get("max_agents") or _cfg.deduction_max_agents),
+        "max_concurrent": int(d.get("max_concurrent") or _cfg.deduction_max_concurrent),
+        "retrieve_top_k": int(d.get("retrieve_top_k") or _cfg.deduction_retrieve_top_k),
+    }
+
+
+@router.post("/engine")
+async def update_engine(body: EngineConfigUpdate):
+    d = registry._data
+    d["max_agents"] = body.max_agents
+    d["max_concurrent"] = body.max_concurrent
+    d["retrieve_top_k"] = body.retrieve_top_k
+    registry.save()
+    return {"status": "ok"}
+
+
 # ── Model listing + test ──
 def _real_key_or(req_key: str) -> str:
     """脱敏串(含 * / •)、空、或 'local' 时直接返回空字符串。
