@@ -48,10 +48,13 @@ async def get_llm_config():
 
 @router.post("/llm")
 async def update_llm(body: LLMConfigUpdate):
-    if body.llm_base_url: registry.llm_base_url = body.llm_base_url.rstrip("/")
-    if body.llm_api_key and body.llm_api_key != "••••••••": registry.llm_api_key = body.llm_api_key
-    if body.llm_model: registry.llm_model = body.llm_model
-    if body.provider_slug: registry.llm_provider_slug = body.provider_slug
+    if body.llm_base_url or body.llm_base_url == "":
+        registry.llm_base_url = body.llm_base_url.rstrip("/")
+    if body.llm_api_key != "••••••••": registry.llm_api_key = body.llm_api_key
+    if body.llm_model or body.llm_model == "":
+        registry.llm_model = body.llm_model
+    if body.provider_slug or body.provider_slug == "":
+        registry.llm_provider_slug = body.provider_slug
     registry.llm_temperature = body.llm_temperature
     registry.save()
     return {"status": "ok"}
@@ -69,21 +72,24 @@ async def get_embed_config():
 
 @router.post("/embedding")
 async def update_embed(body: EmbedConfigUpdate):
-    if body.embedding_api_base: registry.embedding_api_base = body.embedding_api_base.rstrip("/")
-    if body.embedding_api_key and body.embedding_api_key != "••••••••": registry.embedding_api_key = body.embedding_api_key
-    if body.embedding_model_name: registry.embedding_model_name = body.embedding_model_name
-    if body.provider_slug: registry.embed_provider_slug = body.provider_slug
+    if body.embedding_api_base or body.embedding_api_base == "":
+        registry.embedding_api_base = body.embedding_api_base.rstrip("/")
+    if body.embedding_api_key != "••••••••": registry.embedding_api_key = body.embedding_api_key
+    if body.embedding_model_name or body.embedding_model_name == "":
+        registry.embedding_model_name = body.embedding_model_name
+    if body.provider_slug or body.provider_slug == "":
+        registry.embed_provider_slug = body.provider_slug
     registry.save()
     return {"status": "ok"}
 
 
 # ── Model listing + test ──
 def _real_key_or(req_key: str) -> str:
-    """脱敏串(含 * / •)、空、或 'local' 时回退使用 registry 中存储的真实 Key，
-    避免把脱敏 Key 当真实 Key 塞进 HTTP 头(非 ASCII 字符会导致编码错误)。"""
+    """脱敏串(含 * / •)、空、或 'local' 时直接返回空字符串。
+    本地服务无需 key，云端服务需用户显式输入。不再回退到存储值。"""
     k = (req_key or "").strip()
     if not k or k.lower() == "local" or "*" in k or "•" in k:
-        return registry.llm_api_key or ""
+        return ""
     return k
 
 

@@ -180,11 +180,15 @@ export default function App() {
   const [cfgEmbedModel, setCfgEmbedModel] = useState("");
   const [cfgEmbedProvider, setCfgEmbedProvider] = useState("");
   const [cfgFetchingModels, setCfgFetchingModels] = useState(false);
-  const [cfgFetchedModels, setCfgFetchedModels] = useState<string[]>([]);
-  const [cfgModelError, setCfgModelError] = useState("");
+  const [cfgLLMFetchedModels, setCfgLLMFetchedModels] = useState<string[]>([]);
+  const [cfgLLMModelError, setCfgLLMModelError] = useState("");
+  const [cfgEmbedFetchedModels, setCfgEmbedFetchedModels] = useState<string[]>([]);
+  const [cfgEmbedModelError, setCfgEmbedModelError] = useState("");
   const [cfgSaving, setCfgSaving] = useState(false);
   const [cfgLLMTest, setCfgLLMTest] = useState<"" | "testing" | "ok" | "fail">("");
   const [cfgProviders, setCfgProviders] = useState<Array<{slug:string;name:string;default_llm_base_url:string;default_llm_model:string;default_embed_model:string;note:string}>>([]);
+
+  const EMBED_MODEL_KW = ["embed", "embedding", "bge", "e5", "gte", "stella", "nomic", "jina"];
 
   const fetchConfig = useCallback(async (): Promise<boolean> => {
     try {
@@ -221,16 +225,33 @@ export default function App() {
     const base = settingsTab === "llm" ? cfgLLMBase : cfgEmbedBase;
     const key = settingsTab === "llm" ? cfgLLMKey : cfgEmbedKey;
     if (!base) return;
-    setCfgFetchingModels(true); setCfgModelError(""); setCfgFetchedModels([]);
+    setCfgFetchingModels(true);
+    if (settingsTab === "llm") { setCfgLLMModelError(""); setCfgLLMFetchedModels([]); }
+    else { setCfgEmbedModelError(""); setCfgEmbedFetchedModels([]); }
     try {
       const r = await fetch(`${API_BASE}/config/list-models`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_type: "openai", base_url: base, api_key: key || "local" }),
+        body: JSON.stringify({ api_type: "openai", base_url: base, api_key: key }),
       });
       const data = await r.json();
-      if (data.error) { setCfgModelError(data.error); }
-      else { setCfgFetchedModels(data.models || []); }
-    } catch (e: any) { setCfgModelError(e.message || "Failed"); }
+      const all: string[] = data.models || [];
+      if (data.error) {
+        if (settingsTab === "llm") setCfgLLMModelError(data.error);
+        else setCfgEmbedModelError(data.error);
+      } else if (settingsTab === "llm") {
+        // LLM tab: 过滤掉嵌入模型
+        const filtered = all.filter(m => !EMBED_MODEL_KW.some(k => m.toLowerCase().includes(k)));
+        setCfgLLMFetchedModels(filtered);
+        if (filtered.length === 0) setCfgLLMModelError("未检测到对话模型（已过滤嵌入模型），请检查模型列表");
+      } else {
+        // Embedding tab: 仅保留嵌入模型，若全过滤则留全部
+        const filtered = all.filter(m => EMBED_MODEL_KW.some(k => m.toLowerCase().includes(k)));
+        setCfgEmbedFetchedModels(filtered.length > 0 ? filtered : all);
+      }
+    } catch (e: any) {
+      if (settingsTab === "llm") setCfgLLMModelError(e.message || "Failed");
+      else setCfgEmbedModelError(e.message || "Failed");
+    }
     setCfgFetchingModels(false);
   }, [settingsTab, cfgLLMBase, cfgLLMKey, cfgEmbedBase, cfgEmbedKey]);
 
@@ -239,7 +260,7 @@ export default function App() {
     try {
       const r = await fetch(`${API_BASE}/config/test-connection`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_type: "openai", base_url: cfgLLMBase, api_key: cfgLLMKey || "local" }),
+        body: JSON.stringify({ api_type: "openai", base_url: cfgLLMBase, api_key: cfgLLMKey }),
       });
       const data = await r.json();
       setCfgLLMTest(data.ok ? "ok" : "fail");
@@ -255,7 +276,7 @@ export default function App() {
       });
       await fetch(`${API_BASE}/config/embedding`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ embedding_api_base: cfgEmbedBase || cfgLLMBase, embedding_api_key: cfgEmbedKey || cfgLLMKey, embedding_model_name: cfgEmbedModel, provider_slug: cfgEmbedProvider || cfgLLMProvider }),
+        body: JSON.stringify({ embedding_api_base: cfgEmbedBase, embedding_api_key: cfgEmbedKey, embedding_model_name: cfgEmbedModel, provider_slug: cfgEmbedProvider }),
       });
       await fetchConfig();
       setShowSettings(false);
@@ -1572,15 +1593,15 @@ export default function App() {
               <>
                 <label style={lbl}>服务商</label>
                 <select value={cfgEmbedProvider} onChange={e => { setCfgEmbedProvider(e.target.value); const p = cfgProviders.find(x => x.slug === e.target.value); if (p?.default_llm_base_url) { setCfgEmbedBase(p.default_llm_base_url); } }} style={{ ...inp, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6 }}>
-                  <option value="">与 LLM 相同</option>
+                  <option value="">独立配置...</option>
                   {cfgProviders.map(p => <option key={p.slug} value={p.slug}>{p.name}{p.default_embed_model ? ` (${p.default_embed_model})` : ""}{p.note ? ` — ${p.note}` : ""}</option>)}
                 </select>
 
                 <label style={lbl}>嵌入 API 地址</label>
-                <input style={inp} value={cfgEmbedBase} onChange={e => setCfgEmbedBase(e.target.value)} placeholder={cfgLLMBase || "http://127.0.0.1:1234/v1"} />
+                <input style={inp} value={cfgEmbedBase} onChange={e => setCfgEmbedBase(e.target.value)} placeholder="http://127.0.0.1:1234/v1" />
 
                 <label style={lbl}>嵌入 API Key</label>
-                <input style={inp} type="password" value={cfgEmbedKey} onChange={e => setCfgEmbedKey(e.target.value)} placeholder="与 LLM 相同 (留空)" />
+                <input style={inp} type="password" value={cfgEmbedKey} onChange={e => setCfgEmbedKey(e.target.value)} placeholder="嵌入服务 API Key" />
 
                 <label style={lbl}>嵌入模型名称</label>
                 <input style={inp} value={cfgEmbedModel} onChange={e => setCfgEmbedModel(e.target.value)} placeholder="text-embedding-3-small" />
@@ -1590,16 +1611,26 @@ export default function App() {
               </>
             )}
 
-            {/* Model list */}
-            {cfgFetchedModels.length > 0 && (
+            {/* LLM Model list */}
+            {settingsTab === "llm" && cfgLLMFetchedModels.length > 0 && (
               <div style={{ maxHeight: 180, overflow: "auto", marginBottom: 16, background: "#0f172a", borderRadius: 6, padding: 8 }}>
-                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>可用模型 ({cfgFetchedModels.length})</div>
-                {cfgFetchedModels.map(m => (
-                  <div key={m} onClick={() => { if (settingsTab === "llm") setCfgLLMModel(m); else setCfgEmbedModel(m); }} style={{ padding: "3px 6px", cursor: "pointer", borderRadius: 4, fontSize: 13, color: (settingsTab === "llm" ? cfgLLMModel : cfgEmbedModel) === m ? "#3b82f6" : "#cbd5e1" }}>{m}</div>
+                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>对话模型 ({cfgLLMFetchedModels.length})</div>
+                {cfgLLMFetchedModels.map(m => (
+                  <div key={m} onClick={() => setCfgLLMModel(m)} style={{ padding: "3px 6px", cursor: "pointer", borderRadius: 4, fontSize: 13, color: cfgLLMModel === m ? "#3b82f6" : "#cbd5e1" }}>{m}</div>
                 ))}
               </div>
             )}
-            {cfgModelError && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 12 }}>{cfgModelError}</div>}
+            {settingsTab === "llm" && cfgLLMModelError && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 12 }}>{cfgLLMModelError}</div>}
+            {/* Embed Model list */}
+            {settingsTab === "embed" && cfgEmbedFetchedModels.length > 0 && (
+              <div style={{ maxHeight: 180, overflow: "auto", marginBottom: 16, background: "#0f172a", borderRadius: 6, padding: 8 }}>
+                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>嵌入模型 ({cfgEmbedFetchedModels.length})</div>
+                {cfgEmbedFetchedModels.map(m => (
+                  <div key={m} onClick={() => setCfgEmbedModel(m)} style={{ padding: "3px 6px", cursor: "pointer", borderRadius: 4, fontSize: 13, color: cfgEmbedModel === m ? "#3b82f6" : "#cbd5e1" }}>{m}</div>
+                ))}
+              </div>
+            )}
+            {settingsTab === "embed" && cfgEmbedModelError && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 12 }}>{cfgEmbedModelError}</div>}
 
             <button onClick={saveConfig} disabled={cfgSaving} style={{ ...btn, width: "100%", background: "#3b82f6", color: "#fff", height: 36, fontSize: 14 }}>
               {cfgSaving ? "保存中..." : "保存配置"}
