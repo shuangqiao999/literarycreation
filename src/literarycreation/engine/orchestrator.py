@@ -698,6 +698,10 @@ class DeductionOrchestrator:
             story_state = {}  # 累积剧情状态
             canon = CanonLedger.from_state(story_state, blueprint=outline)
             alive_checker = (lambda st: self._rule_engine.is_alive(st)) if self._rule_engine else None
+            from .climax_driver import ClimaxDriver
+            from .word_count_enforcer import WordCountEnforcer
+            self._climax_driver = ClimaxDriver(n)
+            enforcer = WordCountEnforcer(min_ratio=0.75)
             for i, rnd in enumerate(rounds, 1):
                 self._check_cancel()
                 events = [act.content for act in rnd.actions if getattr(act, "content", "")]
@@ -766,6 +770,18 @@ class DeductionOrchestrator:
                 if reveal_ctx:
                     story_ctx = reveal_ctx + "\n\n" + story_ctx
 
+                # 场景种子（本章可用素材，丰富描写）
+                from .prose_renderer import build_scene_seeds_text
+                seeds_ctx = build_scene_seeds_text(outline, i)
+                if seeds_ctx:
+                    story_ctx = seeds_ctx + "\n\n" + story_ctx
+
+                # 高潮推进（中后段主动引导；仅在本章无强制事件时注入，避免与蓝图双驱动）
+                if self._climax_driver is not None and not outline_event:
+                    climax_ctx = self._climax_driver.build_text(i, canon, story_state)
+                    if climax_ctx:
+                        story_ctx = climax_ctx + "\n\n" + story_ctx
+
                 # P6: 短语避重 — 统计已出现的高频短语并注入提示
                 phrase_hint = build_phrase_hint(story_state)
                 if phrase_hint:
@@ -825,6 +841,26 @@ class DeductionOrchestrator:
                         self._log("report",
                                   f"第{i}章仍存在 {len(conflicts)} 处正典冲突（已达重写上限），保留当前稿并记录警告")
                         logger.warning("[Orchestrator] 第%d章未消除的正典冲突: %s", i, conflicts)
+
+                # 字数硬约束：成功生成但太短 → 扩写（与 _retry_prose 正交）
+                if not is_fallback and per_ch > 0:
+                    passed, _msg = enforcer.check(text, per_ch)
+                    if not passed:
+                        from literarycreation.core.llm_client import DeductionLLMClient, Message
+                        from ._utils import extract_text as _extract_text
+                        _exp_client = DeductionLLMClient()
+
+                        async def _expand(prompt: str, _c=_exp_client, _pc=per_ch) -> str:
+                            resp = await _c.chat(
+                                [Message(role="user", content=prompt)],
+                                system="你是文学作家，在完整保留原情节、人物、对话与顺序的前提下扩写加长本章正文。只输出正文。",
+                                temperature=0.8, max_tokens=int(_pc * 2.4) if _pc else 0)
+                            return _extract_text(resp).strip()
+
+                        text = await enforcer.enforce(text, per_ch, _expand, max_retries=2, log_fn=self._log)
+                        post = canon.validate(text, current_round=i)
+                        if post:
+                            logger.warning("[Orchestrator] 第%d章扩写后仍存正典风险: %s", i, post)
 
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 path = _write(fname, text)

@@ -65,9 +65,9 @@ def _metrics_to_narrative(state: Any) -> str:
 class StrategicReasoner:
     """LLM-based decision maker for literary creation.
 
-    Two modes:
-      - reason_quantified(): Freeform writing — agents decide freely
-      - reason_narrative(): Blueprint execution — agents follow scheduled events
+    Single entry point reason(mode=...):
+      - mode="freeform": Free writing — agents decide freely
+      - mode="blueline": Blueprint execution — agents follow scheduled events
     """
 
     def __init__(
@@ -80,68 +80,13 @@ class StrategicReasoner:
         self._preprocessor = preprocessor
         self._immutable_goals = immutable_goals or []
 
-    async def reason_quantified(
+    async def reason(
         self,
         *,
         agent: Any,
         round_number: int,
         state: Any,
-        other_context: str = "",
-        relationship_context: str = "",
-        static_knowledge: str = "",
-        dynamic_memory: str = "",
-        recent_events: str = "",
-        env_context: str = "",
-        user_cmd: str = "",
-        self_memory: str = "",
-    ) -> dict[str, Any]:
-        """自由创作：角色基于人格和处境，自由决定下一步行动。"""
-        goals = agent.goals if hasattr(agent, "goals") else []
-        goals_txt = "\n".join(f"- {g}" for g in goals) if goals else "（无具体目标）"
-        imm = "；".join(self._immutable_goals) if self._immutable_goals else "无"
-        narrative_state = _metrics_to_narrative(state)
-
-        header = (
-            f"你是「{agent.name}」。\n\n"
-            f"## 你的人格\n{agent.persona or '（无）'}\n\n"
-            f"## 你的目标\n{goals_txt}\n\n"
-            f"## 你当前的状态\n{narrative_state}\n"
-        )
-        if self_memory:
-            header += f"\n## 你最近做过的事\n{self_memory}\n"
-        if user_cmd:
-            header += f"\n## 外部干预指令（最高优先级）\n{user_cmd}\n"
-        if other_context:
-            header += f"\n## 其他角色状态\n{other_context}\n"
-        if relationship_context:
-            header += f"\n## 你的关系网络\n{relationship_context}\n"
-        if dynamic_memory:
-            header += f"\n## 相关的过往事件\n{dynamic_memory}\n"
-        if recent_events:
-            header += f"\n## 近期局势\n{recent_events}\n"
-        if static_knowledge:
-            header += f"\n## 原著背景参考\n{static_knowledge}\n"
-        if env_context:
-            header += f"\n## 环境\n{env_context}\n"
-
-        header += (
-            f"\n现在，请以{agent.name}的身份，基于以上所有信息，决定你下一步的行动。\n"
-            "你可以做任何符合你性格和处境的行动，不需要局限于预定义的类型。\n"
-            "冲突和意外是故事的燃料——不要害怕做出大胆的选择。\n\n"
-            + _FREE_SPEC
-        )
-
-        return await self._call_llm(
-            header,
-            system="你是一位文学创作中的角色。基于你的人格、记忆和处境，自由决定下一步行动。只输出 JSON。",
-        )
-
-    async def reason_narrative(
-        self,
-        *,
-        agent: Any,
-        round_number: int,
-        state: Any,
+        mode: str = "freeform",
         event_mandate: str = "",
         correction_level: str = "none",
         other_context: str = "",
@@ -150,57 +95,90 @@ class StrategicReasoner:
         dynamic_memory: str = "",
         recent_events: str = "",
         env_context: str = "",
+        user_cmd: str = "",
         self_memory: str = "",
+        narrative_memory: str = "",
     ) -> dict[str, Any]:
-        """蓝图执行：角色在既定事件结构内自由演绎。"""
+        """统一决策入口：角色基于人格、记忆、弧光自然推理行动。
+
+        mode="freeform" 自由创作；mode="blueline" 蓝图执行（注入本轮必须推动的事件与偏离校正）。
+        """
         goals = agent.goals if hasattr(agent, "goals") else []
-        goals_txt = "\n".join(f"- {g}" for g in goals) if goals else "（无）"
+        goals_txt = "\n".join(f"- {g}" for g in goals) if goals else "（无具体目标）"
         narrative_state = _metrics_to_narrative(state)
 
-        correction_directive = ""
-        if correction_level == "soft":
-            correction_directive = "【注意】当前剧情走向与提纲目标略有偏离，请在决策中优先靠近目标方向。"
-        elif correction_level == "strong":
-            correction_directive = "【强制引导】当前剧情已偏离提纲目标。你的决策必须优先推动剧情回到目标轨迹。"
-        elif correction_level == "event_inject":
-            correction_directive = (
-                f"【强剧情推力】系统检测到重大偏离。以下外部事件将迫使剧情转向，请围绕此事件做出反应。\n"
-                f"外部事件：{event_mandate or '重大事件发生'}"
+        if mode == "blueline":
+            header = (
+                f"你是「{agent.name}」，这是一个文学创作中的关键场景。\n\n"
+                f"## 你的人格\n{agent.persona or '（无）'}\n\n"
+                f"## 你的目标\n{goals_txt}\n\n"
+                f"## 你当前的状态\n{narrative_state}\n"
+            )
+        else:
+            imm = "；".join(self._immutable_goals) if self._immutable_goals else "无"
+            header = (
+                f"你是「{agent.name}」。\n\n"
+                f"## 你的人格\n{agent.persona or '（无）'}\n\n"
+                f"## 你的目标\n{goals_txt}\n"
+                f"（不可动摇的初衷：{imm}）\n\n"
+                f"## 你当前的状态\n{narrative_state}\n"
             )
 
-        header = (
-            f"你是「{agent.name}」，这是一个文学创作中的关键场景。\n\n"
-            f"## 你的人格\n{agent.persona or '（无）'}\n\n"
-            f"## 你的目标\n{goals_txt}\n\n"
-            f"## 你当前的状态\n{narrative_state}\n"
-        )
+        # 叙事记忆（亲身经历，优先于碎片检索）
+        if narrative_memory:
+            header += f"\n## 你的亲身经历（叙事记忆）\n{narrative_memory}\n"
         if self_memory:
             header += f"\n## 你最近做过的事\n{self_memory}\n"
-        if event_mandate:
-            header += f"\n## 【本轮必须推动的剧情】\n{event_mandate}\n"
-        if correction_directive:
-            header += f"\n## {correction_directive}\n"
+
+        # blueline 专属：本轮必须推动的剧情 + 偏离校正
+        if mode == "blueline":
+            if event_mandate:
+                header += f"\n## 【本轮必须推动的剧情】\n{event_mandate}\n"
+            correction_directive = ""
+            if correction_level == "soft":
+                correction_directive = "【注意】当前剧情走向与提纲目标略有偏离，请在决策中优先靠近目标方向。"
+            elif correction_level == "strong":
+                correction_directive = "【强制引导】当前剧情已偏离提纲目标。你的决策必须优先推动剧情回到目标轨迹。"
+            elif correction_level == "event_inject":
+                correction_directive = (
+                    "【强剧情推力】系统检测到重大偏离。以下外部事件将迫使剧情转向，请围绕此事件做出反应。\n"
+                    f"外部事件：{event_mandate or '重大事件发生'}"
+                )
+            if correction_directive:
+                header += f"\n## {correction_directive}\n"
+        elif user_cmd:
+            header += f"\n## 外部干预指令（最高优先级）\n{user_cmd}\n"
+
         if other_context:
             header += f"\n## 其他角色状态\n{other_context}\n"
         if relationship_context:
             header += f"\n## 你的关系网络\n{relationship_context}\n"
         if dynamic_memory:
             header += f"\n## 相关的过往事件\n{dynamic_memory}\n"
+        if recent_events and mode != "blueline":
+            header += f"\n## 近期局势\n{recent_events}\n"
         if static_knowledge:
             header += f"\n## 原著背景参考\n{static_knowledge}\n"
         if env_context:
             header += f"\n## 环境\n{env_context}\n"
 
-        header += (
-            f"\n请以{agent.name}的身份，自由演绎本轮的剧情。"
-            "你可以做任何符合角色性格的选择，不需要局限于预定义的动作类型。\n\n"
-            + _FREE_SPEC
-        )
+        if mode == "blueline":
+            header += (
+                f"\n请以{agent.name}的身份，自由演绎本轮的剧情。"
+                "你可以做任何符合角色性格的选择，不需要局限于预定义的动作类型。\n\n"
+                + _FREE_SPEC
+            )
+            system = "你是文学创作中的角色。基于你的人格、记忆和处境，自由演绎剧情。只输出 JSON。"
+        else:
+            header += (
+                f"\n现在，请以{agent.name}的身份，基于以上所有信息，决定你下一步的行动。\n"
+                "你可以做任何符合你性格和处境的行动，不需要局限于预定义的类型。\n"
+                "冲突和意外是故事的燃料——不要害怕做出大胆的选择。\n\n"
+                + _FREE_SPEC
+            )
+            system = "你是一位文学创作中的角色。基于你的人格、记忆和处境，自由决定下一步行动。只输出 JSON。"
 
-        return await self._call_llm(
-            header,
-            system="你是文学创作中的角色。基于你的人格、记忆和处境，自由演绎剧情。只输出 JSON。",
-        )
+        return await self._call_llm(header, system=system)
 
     async def _call_llm(self, prompt: str, system: str) -> dict[str, Any]:
         from literarycreation.core.llm_client import DeductionLLMClient, Message

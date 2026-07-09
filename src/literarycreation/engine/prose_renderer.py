@@ -125,6 +125,25 @@ def build_reveal_text(outline: dict[str, Any] | None, chapter_idx: int) -> str:
             f"严禁提前泄露后续章节才应揭晓的真相】")
 
 
+def build_scene_seeds_text(outline: dict[str, Any] | None, chapter_idx: int) -> str:
+    """取本章场景种子，构建"可用素材"提示块（供 LLM 自由选用，丰富描写）。"""
+    if not outline:
+        return ""
+    for ch in outline.get("chapters") or []:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            if int(ch.get("round", 0)) == chapter_idx:
+                seeds = [str(s).strip() for s in (ch.get("scene_seeds") or []) if str(s).strip()]
+                if seeds:
+                    return ("【本章可用场景素材（可选取以丰富描写，不必全用，也可自行拓展）】\n"
+                            + "\n".join(f"- {s}" for s in seeds))
+                return ""
+        except (TypeError, ValueError):
+            continue
+    return ""
+
+
 def build_style_migration(detected: str, target: str, chapter_idx: int, total_chapters: int) -> str:
     """手选风格与素材原生风格冲突时，逐章渐进迁移。
 

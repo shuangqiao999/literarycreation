@@ -76,12 +76,21 @@ class SimulationEngine:
         self._max_concurrent = max(1, max_concurrent)
         self._sem = asyncio.Semaphore(self._max_concurrent)
 
+        from .narrative_memory import NarrativeMemoryStore
+        self.narrative_memory = NarrativeMemoryStore(cap=8)
+
         from .strategic_reasoner import StrategicReasoner
         self.reasoner = StrategicReasoner(
             chat_fn=chat_fn,
             preprocessor=preprocessor,
             immutable_goals=self._immutable_goals,
         )
+
+    def _narrative_memory_text(self, agent_id: str) -> str:
+        try:
+            return self.narrative_memory.inject_prompt(agent_id)
+        except Exception:
+            return ""
 
     def _pop_override(self, agent: Any) -> dict | None:
         store = self._fsm_override_store
@@ -158,13 +167,14 @@ class SimulationEngine:
             recent = self._build_recent_context_for_agent(agent.entity_id)
 
             async with self._sem:
-                dec = await self.reasoner.reason_narrative(
-                    agent=agent, round_number=round_number, state=st,
+                dec = await self.reasoner.reason(
+                    agent=agent, round_number=round_number, state=st, mode="blueline",
                     event_mandate=mandate_text, correction_level=correction_level,
                     other_context=others, relationship_context=rel_ctx,
                     static_knowledge=static, dynamic_memory=dyn,
                     recent_events=recent, env_context=self._env_context(),
                     self_memory=kuzu_self,
+                    narrative_memory=self._narrative_memory_text(agent.entity_id),
                 )
             if dec:
                 dec["actor_id"] = agent.entity_id
@@ -177,15 +187,22 @@ class SimulationEngine:
             dec.setdefault("target", "")
             return dec
 
-        decisions = [r for r in await asyncio.gather(*[_decide(a) for a in alive_agents]) if r is not None]
-        for j in range(1, len(decisions)):
-            prev = decisions[j - 1]
-            prev_agent = next((a for a in alive_agents if a.entity_id == prev.get("actor_id","")), None)
-            if prev_agent:
-                prev_ctx = f"[同轮前序] {prev_agent.name}刚刚决定：{prev.get('action_type','?')}"
-                decisions[j]["rationale"] = prev_ctx + "\n" + (decisions[j].get("rationale",""))
+        ranges = re_engine.ranges()
+        decisions = []
+        self_seen: dict[str, dict[str, float]] = {}
+        for j, agent in enumerate(alive_agents):
+            dec = await _decide(agent)
+            if dec is None:
+                continue
+            decisions.append(dec)
+            # 事件流：非最后一个角色，立即结算其自身效应，令下一个角色基于变化后的世界决策
+            if j < len(alive_agents) - 1 and agent.entity_id in self._states:
+                sd = re_engine.compute_self_deltas(dec, state=self._states.get(agent.entity_id), env=self._env)
+                if sd:
+                    self_seen[agent.entity_id] = sd
+                    self._states[agent.entity_id].apply_deltas(sd, round_number, ranges)
 
-        return await self._apply_decisions(round_number, decisions, client, sim_round)
+        return await self._finalize_round(round_number, decisions, client, sim_round, self_seen)
 
     # ── Mode A: Freeform writing ──
 
@@ -228,12 +245,13 @@ class SimulationEngine:
             recent = self._build_recent_context_for_agent(agent.entity_id)
 
             async with self._sem:
-                dec = await self.reasoner.reason_quantified(
-                    agent=agent, round_number=round_number, state=st,
+                dec = await self.reasoner.reason(
+                    agent=agent, round_number=round_number, state=st, mode="freeform",
                     other_context=others, relationship_context=rel_ctx,
                     static_knowledge=static, dynamic_memory=dyn,
                     recent_events=recent, env_context=self._env_context(),
                     self_memory=kuzu_self,
+                    narrative_memory=self._narrative_memory_text(agent.entity_id),
                 )
             if dec:
                 dec["actor_id"] = agent.entity_id
@@ -246,24 +264,32 @@ class SimulationEngine:
             dec.setdefault("target", "")
             return dec
 
-        decisions = [r for r in await asyncio.gather(*[_decide(a) for a in alive_agents]) if r is not None]
-        for j in range(1, len(decisions)):
-            prev = decisions[j - 1]
-            prev_agent = next((a for a in alive_agents if a.entity_id == prev.get("actor_id","")), None)
-            if prev_agent:
-                prev_ctx = f"[同轮前序] {prev_agent.name}刚刚决定：{prev.get('action_type','?')}"
-                decisions[j]["rationale"] = prev_ctx + "\n" + (decisions[j].get("rationale",""))
+        ranges = re_engine.ranges()
+        decisions = []
+        self_seen: dict[str, dict[str, float]] = {}
+        for j, agent in enumerate(alive_agents):
+            dec = await _decide(agent)
+            if dec is None:
+                continue
+            decisions.append(dec)
+            # 事件流：非最后一个角色，立即结算其自身效应，令下一个角色基于变化后的世界决策
+            if j < len(alive_agents) - 1 and agent.entity_id in self._states:
+                sd = re_engine.compute_self_deltas(dec, state=self._states.get(agent.entity_id), env=self._env)
+                if sd:
+                    self_seen[agent.entity_id] = sd
+                    self._states[agent.entity_id].apply_deltas(sd, round_number, ranges)
 
-        return await self._apply_decisions(round_number, decisions, client, sim_round)
+        return await self._finalize_round(round_number, decisions, client, sim_round, self_seen)
 
     # ── Shared: apply rule engine effects ──
 
-    async def _apply_decisions(
+    async def _finalize_round(
         self, round_number: int, decisions: list[dict], client: Any,
-        sim_round: SimulationRound,
+        sim_round: SimulationRound, self_deltas: dict[str, dict[str, float]] | None = None,
     ) -> SimulationRound:
         re_engine = self._rule_engine
         ranges = re_engine.ranges()
+        self_deltas = self_deltas or {}
 
         auto_deltas = re_engine.evaluate_auto_effects(self._states)
         for eid, d in auto_deltas.items():
@@ -275,15 +301,23 @@ class SimulationEngine:
             if delay_d:
                 st.apply_deltas(delay_d, round_number, ranges)
 
-        deltas, interactions = re_engine.resolve_round(
-            self._states, decisions, self._name_to_id, self._env, collect_interactions=True)
+        # 自身效应已在事件流循环即时结算；此处仅结算跨角色"目标"效应
+        target_deltas = re_engine.resolve_targets(
+            self._states, decisions, self._name_to_id, self._env)
 
         if len(self._states) >= 20:
-            _bulk_apply_deltas(self._states, deltas, ranges, re_engine.metrics())
+            _bulk_apply_deltas(self._states, target_deltas, ranges, re_engine.metrics())
         else:
-            for eid, d in deltas.items():
+            for eid, d in target_deltas.items():
                 if eid in self._states:
                     self._states[eid].apply_deltas(d, round_number, ranges)
+
+        # 合并 自身+目标 增量，供 outcome 反馈与因果 effect 记录
+        deltas: dict[str, dict[str, float]] = {a: dict(d) for a, d in self_deltas.items()}
+        for eid, d in target_deltas.items():
+            bucket = deltas.setdefault(eid, {})
+            for k, v in d.items():
+                bucket[k] = bucket.get(k, 0.0) + v
 
         self._last_round_outcomes: dict[str, list[dict]] = {}
         for dec in decisions:
@@ -338,6 +372,12 @@ class SimulationEngine:
                             round_number=round_number, event_type=action.action_type)
                     except Exception as e:
                         logger.warning("[Simulator] Event memory write failed: %s", e)
+
+        # 更新角色叙事记忆（亲身经历，供后续决策连贯参考）
+        for action in sim_round.actions:
+            summary = f"第{round_number}轮：{action.action_type}" + (
+                f"（{action.content[:40]}）" if action.content else "")
+            self.narrative_memory.add(action.agent_id, summary)
 
         # 写入 narrator 文本供 prose renderer
         narration = ""

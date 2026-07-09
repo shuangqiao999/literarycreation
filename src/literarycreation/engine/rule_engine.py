@@ -268,6 +268,53 @@ class RuleEngine:
             return result, interactions
         return result
 
+    def compute_self_deltas(self, dec: dict[str, Any], state: Any = None,
+                            env: dict[str, str] | None = None) -> dict[str, float]:
+        """单个决策的"自身"效应合计（事件流模式：决策后立即结算施加给行动者本人）。"""
+        out: dict[str, float] = {}
+        for action, sub_intensity, _target in self._iter_subactions(dec):
+            if sub_intensity <= 0:
+                continue
+            self_d, _tgt = self.compute_deltas(action, sub_intensity, env, state=state)
+            for k, v in self_d.items():
+                out[k] = out.get(k, 0.0) + v
+        return out
+
+    def resolve_targets(self, snapshot_states: dict[str, EntityState],
+                        decisions: list[dict[str, Any]], name_to_id: dict[str, str],
+                        env: dict[str, str] | None = None,
+                        collect_interactions: bool = False):
+        """仅计算"作用于目标"的跨角色效应（自身效应已在事件流循环中即时结算）。"""
+        result: dict[str, dict[str, float]] = {}
+        interactions: list[dict[str, Any]] = []
+        lower_map = {n.lower().strip(): eid for n, eid in name_to_id.items()}
+
+        def _add(eid: str, d: dict[str, float]) -> None:
+            bucket = result.setdefault(eid, {})
+            for k, v in d.items():
+                bucket[k] = bucket.get(k, 0.0) + v
+
+        for dec in decisions:
+            actor = dec.get("actor_id")
+            if actor is None or actor not in snapshot_states:
+                continue
+            for action, sub_intensity, target in self._iter_subactions(dec):
+                if sub_intensity <= 0 or not target:
+                    continue
+                _self_d, tgt_d = self.compute_deltas(action, sub_intensity, env,
+                                                     state=snapshot_states.get(actor))
+                if not tgt_d:
+                    continue
+                tid = lower_map.get(target.lower().strip())
+                if tid and tid != actor and tid in snapshot_states:
+                    _add(tid, tgt_d)
+                    if collect_interactions:
+                        interactions.append({"actor": actor, "target": tid,
+                                             "action": action, "deltas": dict(tgt_d)})
+        if collect_interactions:
+            return result, interactions
+        return result
+
     @staticmethod
     def _iter_subactions(dec: dict[str, Any]):  # generator — no return type annotation to avoid typing complexity
         """将决策展开为 [(action_type, sub_intensity, target), ...] 的生成器。"""
