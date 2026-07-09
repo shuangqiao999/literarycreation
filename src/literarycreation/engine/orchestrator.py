@@ -618,20 +618,12 @@ class DeductionOrchestrator:
             + "\n".join(f"- {l}" for l in lines)
         )
 
-    async def _render_prose(self, report_payload: dict[str, Any]) -> None:
-        """文学模式 Phase 5：逐章生成正文并落盘，计算提纲对齐。"""
-        import re as _re
-        from pathlib import Path
+    def _resolve_effective_style(self, outline: dict[str, Any] | None) -> tuple[str, bool]:
+        """解析生效写作风格：自动=素材检测；手选=所选风格（冲突时启用迁移）。
 
-        from literarycreation.core.config import config as _cfg
-
-        from .prose_renderer import ProseRenderer, build_story_context, append_chapter_summary
-        from .canon import CanonLedger
-
-        rounds = list(getattr(self, "_simulation_rounds", []))
-        outline = getattr(self, "_outline", None)
-
-        # ── 生效风格解析：自动=素材检测风格；手选=所选风格（冲突时逐章迁移）──
+        Returns (style, migrate_required).
+        Sets self._migrate_style / self._detected_style as side effects.
+        """
         style_mode = getattr(self, "_style_mode", "manual")
         detected_style = str((outline or {}).get("detected_style", "") or "").strip()
         selected_style = getattr(self, "_selected_style", "") or ""
@@ -648,7 +640,261 @@ class DeductionOrchestrator:
         self._log("report",
                   f"生效写作风格: {style}（模式={'自动' if style_mode == 'auto' else '手动'}"
                   + (f"，素材风格={detected_style}，逐章向目标迁移" if migrate else "") + "）")
+        return style, migrate
 
+    def _assemble_story_ctx(
+        self,
+        *,
+        i: int, n: int,
+        rnd: Any,
+        outline: dict[str, Any] | None,
+        style: str,
+        story_state: dict[str, Any],
+        canon: Any,
+        ev_by_round: dict[int, list[str]],
+    ) -> dict[str, Any]:
+        """为第 i 章组装所有上下文注入：连续性/防重复/人格/阶段/风格迁移/正典/POV/揭示/场景种子/高潮推进/短语/锚点。
+
+        Returns {"story_ctx","chapter_ctx","outline_event","events","narration","states","style_anchors"}。
+        注入顺序原样保留（共 9 层）。
+        """
+        events = [act.content for act in rnd.actions if getattr(act, "content", "")]
+        narration = str(rnd.state_delta.get("narration", "") or "")
+        states = rnd.state_delta.get("states", {}) or {}
+        outline_event = "；".join(x for x in ev_by_round.get(rnd.round_number, []) if x)
+
+        # 构建 ChapterContext 传递给渲染器
+        chapter_ctx = None
+        if hasattr(self, "_event_scheduler") and self._event_scheduler is not None:
+            try:
+                chapter_ctx = self._event_scheduler.build_chapter_context(
+                    rnd.round_number, self._states, [],
+                    outline.get("characters", []) if outline else None)
+            except Exception:
+                pass
+
+        # 构建累积剧情上下文
+        from .prose_renderer import build_story_context
+
+        story_ctx = build_story_context(story_state, i)
+        # Kuzu 连续性约束
+        continuity = self._build_continuity_ctx(self.graph, self._agents, i)
+        if continuity:
+            story_ctx = continuity + "\n\n" + story_ctx
+        # 防重复上下文
+        from .prose_renderer import build_anti_repeat_context
+
+        anti_repeat = build_anti_repeat_context(story_state)
+        if anti_repeat:
+            story_ctx = anti_repeat + "\n\n" + story_ctx
+        # 角色人格
+        persona_lines = []
+        for a in (self._agents or []):
+            persona_lines.append(f"- {a.name}（{a.persona[:60]}）")
+        if persona_lines:
+            story_ctx = ("【角色语言特征 — 每个角色说话应符合其人格】\n"
+                         + "\n".join(persona_lines) + "\n\n" + story_ctx)
+        # 叙事阶段 + 技巧
+        from .prose_renderer import (
+            build_phrase_hint,
+            build_pov_text,
+            build_reveal_text,
+            build_style_migration,
+            get_technique,
+            pov_allows_switch,
+        )
+
+        technique = get_technique(i, n, allow_pov_switch=pov_allows_switch(outline))
+        if technique:
+            story_ctx = f"【本章叙事技巧指导】{technique}\n\n" + story_ctx
+        # 风格迁移
+        if getattr(self, "_migrate_style", False):
+            mig = build_style_migration(getattr(self, "_detected_style", ""), style, i, n)
+            if mig:
+                story_ctx = mig + "\n\n" + story_ctx
+        # 正典约束 + POV + 揭示层级
+        canon_ctx = canon.build_constraint_text(current_round=i)
+        if canon_ctx:
+            story_ctx = canon_ctx + "\n\n" + story_ctx
+        pov_ctx = build_pov_text(outline)
+        if pov_ctx:
+            story_ctx = pov_ctx + "\n\n" + story_ctx
+        reveal_ctx = build_reveal_text(outline, i)
+        if reveal_ctx:
+            story_ctx = reveal_ctx + "\n\n" + story_ctx
+        # 场景种子
+        from .prose_renderer import build_scene_seeds_text
+
+        seeds_ctx = build_scene_seeds_text(outline, i)
+        if seeds_ctx:
+            story_ctx = seeds_ctx + "\n\n" + story_ctx
+        # 高潮推进（仅在本章无强制事件时注入）
+        if self._climax_driver is not None and not outline_event:
+            climax_ctx = self._climax_driver.build_text(i, canon, story_state)
+            if climax_ctx:
+                story_ctx = climax_ctx + "\n\n" + story_ctx
+        # 短语避重
+        phrase_hint = build_phrase_hint(story_state)
+        if phrase_hint:
+            story_ctx = phrase_hint + "\n\n" + story_ctx
+        # 风格锚点
+        style_anchors = ""
+        if self._preprocessor is not None:
+            try:
+                anchors = self._retrieve_style_anchors(
+                    self._preprocessor, self.session.source_material)
+                if anchors:
+                    style_anchors = ("【文笔锚点 — 参考以下原文笔法】\n"
+                                     + "\n---\n".join(a[:300] for a in anchors[:3]))
+            except Exception:
+                pass
+
+        return {
+            "story_ctx": story_ctx,
+            "chapter_ctx": chapter_ctx,
+            "outline_event": outline_event,
+            "events": events,
+            "narration": narration,
+            "states": states,
+            "style_anchors": style_anchors,
+        }
+
+    async def _render_and_validate_chapter(
+        self,
+        *,
+        renderer: Any,
+        i: int, n: int,
+        ci: dict[str, Any],
+        story_ctx: str,
+        prev_tail: str,
+        per_ch: int,
+        canon: Any,
+        enforcer: Any,
+    ) -> str:
+        """渲染一章 → 正典校验重写 → 字数扩写。返回最终 text。"""
+        text = await renderer.render_chapter(
+            chapter_idx=i, total_chapters=n,
+            seed_text=self.session.source_material,
+            round_events=ci["events"], round_narration=ci["narration"],
+            round_states=ci["states"], prev_tail=prev_tail,
+            outline_event=ci["outline_event"], target_words=per_ch,
+            chapter_context=ci["chapter_ctx"],
+            story_context=story_ctx,
+            style_anchors=ci["style_anchors"],
+        )
+
+        is_fallback = "正文生成失败" in text[:50]
+        # 正典一致性校验 → 冲突则自动重写
+        if not is_fallback and self._canon_retries > 0:
+            attempt = 0
+            conflicts = canon.validate(text, current_round=i)
+            while conflicts and attempt < self._canon_retries:
+                attempt += 1
+                self._log("report",
+                          f"第{i}章检测到 {len(conflicts)} 处正典冲突，第 {attempt} 次自动重写")
+                fix_ctx = ("【一致性修正 — 上一稿存在下列冲突，请重写本章以彻底消除，"
+                           "不得保留矛盾情节】\n"
+                           + "\n".join(f"- {c}" for c in conflicts)
+                           + "\n\n" + story_ctx)
+                text = await renderer.render_chapter(
+                    chapter_idx=i, total_chapters=n,
+                    seed_text=self.session.source_material,
+                    round_events=ci["events"], round_narration=ci["narration"],
+                    round_states=ci["states"], prev_tail=prev_tail,
+                    outline_event=ci["outline_event"], target_words=per_ch,
+                    chapter_context=ci["chapter_ctx"],
+                    story_context=fix_ctx,
+                    style_anchors=ci["style_anchors"],
+                )
+                is_fallback = "正文生成失败" in text[:50]
+                if is_fallback:
+                    break
+                conflicts = canon.validate(text, current_round=i)
+            if conflicts:
+                self._log("report",
+                          f"第{i}章仍存在 {len(conflicts)} 处正典冲突（已达重写上限），保留当前稿并记录警告")
+                logger.warning("[Orchestrator] 第%d章未消除的正典冲突: %s", i, conflicts)
+
+        # 字数硬约束
+        is_fallback = "正文生成失败" in text[:50]
+        if not is_fallback and per_ch > 0:
+            passed, _msg = enforcer.check(text, per_ch)
+            if not passed:
+                from literarycreation.core.llm_client import DeductionLLMClient, Message
+                from ._utils import extract_text as _extract_text
+                _exp_client = DeductionLLMClient()
+
+                async def _expand(prompt: str, _c=_exp_client, _pc=per_ch) -> str:
+                    resp = await _c.chat(
+                        [Message(role="user", content=prompt)],
+                        system="你是文学作家，在完整保留原情节、人物、对话与顺序的前提下扩写加长本章正文。只输出正文。",
+                        temperature=0.8, max_tokens=int(_pc * 2.4) if _pc else 0)
+                    return _extract_text(resp).strip()
+
+                text = await enforcer.enforce(text, per_ch, _expand, max_retries=2, log_fn=self._log)
+                post = canon.validate(text, current_round=i)
+                if post:
+                    logger.warning("[Orchestrator] 第%d章扩写后仍存正典风险: %s", i, post)
+
+        return text
+
+    def _record_chapter(
+        self,
+        *,
+        i: int,
+        text: str,
+        story_state: dict[str, Any],
+        canon: Any,
+        states: dict[str, Any],
+        alive_checker: Any,
+    ) -> None:
+        """更新剧情状态、登记正典、记录指纹/短语、持久化 story_state。"""
+        from .prose_renderer import append_chapter_summary
+
+        append_chapter_summary(story_state, i, text, states)
+        try:
+            canon.establish_from_chapter(text, i, self._states, alive_checker)
+            canon.save_into(story_state)
+        except Exception:
+            pass
+        try:
+            from .prose_renderer import fingerprint_text
+            fps = fingerprint_text(text)
+            story_state.setdefault("used_fingerprints", []).extend(fps)
+            syn = text[:120].replace("\n", " ")
+            story_state.setdefault("used_scenes", "")
+            story_state["used_scenes"] = story_state["used_scenes"][:1500] + f"\n第{i}章已写场景：{syn}"
+            from .prose_renderer import track_repeated_phrases
+            new_phrases = track_repeated_phrases(text)
+            existing = set(story_state.get("tracked_phrases", []))
+            existing.update(new_phrases)
+            story_state["tracked_phrases"] = list(existing)[:8]
+        except Exception:
+            pass
+        try:
+            data = self.store.get(self.session.id)
+            cfg = (data or {}).get("config_json", {}) or {}
+            if isinstance(cfg, str):
+                cfg = _json.loads(cfg)
+            cfg["story_state"] = story_state
+            self.store.update(self.session.id, config_json=_json.dumps(cfg, ensure_ascii=False))
+        except Exception:
+            pass
+
+    async def _render_prose(self, report_payload: dict[str, Any]) -> None:
+        """文学模式 Phase 5：逐章生成正文并落盘，计算提纲对齐。"""
+        import re as _re
+        from pathlib import Path
+
+        from literarycreation.core.config import config as _cfg
+
+        from .canon import CanonLedger
+        from .prose_renderer import ProseRenderer
+
+        rounds = list(getattr(self, "_simulation_rounds", []))
+        outline = getattr(self, "_outline", None)
+
+        style, _migrate = self._resolve_effective_style(outline)
         target_words = int(getattr(self, "_target_words", 0) or 0)
 
         # 关键事件按轮次索引（Mode 2）
@@ -695,7 +941,7 @@ class DeductionOrchestrator:
                                           report_payload.get("final_states", {}), [], characters, outline)
             full_parts.append(prose)
         else:
-            story_state = {}  # 累积剧情状态
+            story_state: dict[str, Any] = {}  # 累积剧情状态
             canon = CanonLedger.from_state(story_state, blueprint=outline)
             alive_checker = (lambda st: self._rule_engine.is_alive(st)) if self._rule_engine else None
             from .climax_driver import ClimaxDriver
@@ -704,206 +950,23 @@ class DeductionOrchestrator:
             enforcer = WordCountEnforcer(min_ratio=0.75)
             for i, rnd in enumerate(rounds, 1):
                 self._check_cancel()
-                events = [act.content for act in rnd.actions if getattr(act, "content", "")]
-                narration = str(rnd.state_delta.get("narration", "") or "")
-                states = rnd.state_delta.get("states", {}) or {}
-                outline_event = "；".join(x for x in ev_by_round.get(rnd.round_number, []) if x)
-
-                # 构建 ChapterContext 传递给渲染器
-                chapter_ctx = None
-                if hasattr(self, "_event_scheduler") and self._event_scheduler is not None:
-                    try:
-                        chapter_ctx = self._event_scheduler.build_chapter_context(
-                            rnd.round_number, self._states, [],
-                            outline.get("characters", []) if outline else None)
-                    except Exception:
-                        pass
-
-                # 构建累积剧情上下文
-                story_ctx = build_story_context(story_state, i)
-                # 构建 Kuzu 连续性约束：阻止死而复生等矛盾
-                continuity = self._build_continuity_ctx(self.graph, self._agents, i)
-                if continuity:
-                    story_ctx = continuity + "\n\n" + story_ctx
-
-                # P0+P2: 注入防重复上下文
-                from .prose_renderer import build_anti_repeat_context
-                anti_repeat = build_anti_repeat_context(story_state)
-                if anti_repeat:
-                    story_ctx = anti_repeat + "\n\n" + story_ctx
-
-                # P1: 注入角色人格 — 确保每个角色说话符合其性格
-                persona_lines = []
-                for a in (self._agents or []):
-                    persona_lines.append(f"- {a.name}（{a.persona[:60]}）")
-                if persona_lines:
-                    persona_ctx = "【角色语言特征 — 每个角色说话应符合其人格】\n" + "\n".join(persona_lines)
-                    story_ctx = persona_ctx + "\n\n" + story_ctx
-
-                # P5: 叙事阶段动态匹配 — 根据章号在总章数中的比例注入指导
-                from .prose_renderer import (
-                    build_phrase_hint,
-                    build_pov_text,
-                    build_reveal_text,
-                    build_style_migration,
-                    get_technique,
-                    pov_allows_switch,
-                )
-                technique = get_technique(i, n, allow_pov_switch=pov_allows_switch(outline))
-                if technique:
-                    story_ctx = f"【本章叙事技巧指导】{technique}\n\n" + story_ctx
-
-                # 风格迁移（手选风格与素材原生风格冲突时，逐章向目标靠拢）
-                if getattr(self, "_migrate_style", False):
-                    mig = build_style_migration(getattr(self, "_detected_style", ""), style, i, n)
-                    if mig:
-                        story_ctx = mig + "\n\n" + story_ctx
-
-                # 正典一致性约束 + POV 锁定 + 揭示层级（蓝图守卫）
-                canon_ctx = canon.build_constraint_text(current_round=i)
-                if canon_ctx:
-                    story_ctx = canon_ctx + "\n\n" + story_ctx
-                pov_ctx = build_pov_text(outline)
-                if pov_ctx:
-                    story_ctx = pov_ctx + "\n\n" + story_ctx
-                reveal_ctx = build_reveal_text(outline, i)
-                if reveal_ctx:
-                    story_ctx = reveal_ctx + "\n\n" + story_ctx
-
-                # 场景种子（本章可用素材，丰富描写）
-                from .prose_renderer import build_scene_seeds_text
-                seeds_ctx = build_scene_seeds_text(outline, i)
-                if seeds_ctx:
-                    story_ctx = seeds_ctx + "\n\n" + story_ctx
-
-                # 高潮推进（中后段主动引导；仅在本章无强制事件时注入，避免与蓝图双驱动）
-                if self._climax_driver is not None and not outline_event:
-                    climax_ctx = self._climax_driver.build_text(i, canon, story_state)
-                    if climax_ctx:
-                        story_ctx = climax_ctx + "\n\n" + story_ctx
-
-                # P6: 短语避重 — 统计已出现的高频短语并注入提示
-                phrase_hint = build_phrase_hint(story_state)
-                if phrase_hint:
-                    story_ctx = phrase_hint + "\n\n" + story_ctx
-
-                # 构建 LanceDB 风格锚点
-                style_anchors = ""
-                if self._preprocessor is not None:
-                    try:
-                        anchors = self._retrieve_style_anchors(
-                            self._preprocessor, self.session.source_material)
-                        if anchors:
-                            style_anchors = "【文笔锚点 — 参考以下原文笔法】\n" + "\n---\n".join(
-                                a[:300] for a in anchors[:3])
-                    except Exception:
-                        pass
-
-                text = await renderer.render_chapter(
-                    chapter_idx=i, total_chapters=n,
-                    seed_text=self.session.source_material,
-                    round_events=events, round_narration=narration,
-                    round_states=states, prev_tail=prev_tail,
-                    outline_event=outline_event, target_words=per_ch,
-                    chapter_context=chapter_ctx,
-                    story_context=story_ctx,
-                    style_anchors=style_anchors,
-                )
-
-                # 正典一致性校验 → 冲突则自动重写本章（最多 self._canon_retries 次）
-                is_fallback = "正文生成失败" in text[:50]
-                if not is_fallback and self._canon_retries > 0:
-                    attempt = 0
-                    conflicts = canon.validate(text, current_round=i)
-                    while conflicts and attempt < self._canon_retries:
-                        attempt += 1
-                        self._log("report",
-                                  f"第{i}章检测到 {len(conflicts)} 处正典冲突，第 {attempt} 次自动重写")
-                        fix_ctx = ("【一致性修正 — 上一稿存在下列冲突，请重写本章以彻底消除，"
-                                   "不得保留矛盾情节】\n"
-                                   + "\n".join(f"- {c}" for c in conflicts)
-                                   + "\n\n" + story_ctx)
-                        text = await renderer.render_chapter(
-                            chapter_idx=i, total_chapters=n,
-                            seed_text=self.session.source_material,
-                            round_events=events, round_narration=narration,
-                            round_states=states, prev_tail=prev_tail,
-                            outline_event=outline_event, target_words=per_ch,
-                            chapter_context=chapter_ctx,
-                            story_context=fix_ctx,
-                            style_anchors=style_anchors,
-                        )
-                        is_fallback = "正文生成失败" in text[:50]
-                        if is_fallback:
-                            break
-                        conflicts = canon.validate(text, current_round=i)
-                    if conflicts:
-                        self._log("report",
-                                  f"第{i}章仍存在 {len(conflicts)} 处正典冲突（已达重写上限），保留当前稿并记录警告")
-                        logger.warning("[Orchestrator] 第%d章未消除的正典冲突: %s", i, conflicts)
-
-                # 字数硬约束：成功生成但太短 → 扩写（与 _retry_prose 正交）
-                if not is_fallback and per_ch > 0:
-                    passed, _msg = enforcer.check(text, per_ch)
-                    if not passed:
-                        from literarycreation.core.llm_client import DeductionLLMClient, Message
-                        from ._utils import extract_text as _extract_text
-                        _exp_client = DeductionLLMClient()
-
-                        async def _expand(prompt: str, _c=_exp_client, _pc=per_ch) -> str:
-                            resp = await _c.chat(
-                                [Message(role="user", content=prompt)],
-                                system="你是文学作家，在完整保留原情节、人物、对话与顺序的前提下扩写加长本章正文。只输出正文。",
-                                temperature=0.8, max_tokens=int(_pc * 2.4) if _pc else 0)
-                            return _extract_text(resp).strip()
-
-                        text = await enforcer.enforce(text, per_ch, _expand, max_retries=2, log_fn=self._log)
-                        post = canon.validate(text, current_round=i)
-                        if post:
-                            logger.warning("[Orchestrator] 第%d章扩写后仍存正典风险: %s", i, post)
+                ci = self._assemble_story_ctx(
+                    i=i, n=n, rnd=rnd, outline=outline, style=style,
+                    story_state=story_state, canon=canon, ev_by_round=ev_by_round)
+                text = await self._render_and_validate_chapter(
+                    renderer=renderer, i=i, n=n, ci=ci, story_ctx=ci["story_ctx"],
+                    prev_tail=prev_tail, per_ch=per_ch, canon=canon, enforcer=enforcer)
 
                 fname = f"{safe_title}_第{i:02d}章.txt"
-                path = _write(fname, text)
+                _write(fname, text)
                 chapters_meta.append({"index": i, "title": f"第{i}章", "file": fname, "words": len(text)})
 
                 is_fallback = "正文生成失败" in text[:50]
                 if not is_fallback:
                     full_parts.append(f"第{i}章\n\n{text}")
                     prev_tail = text[-600:]
-                    # 更新累积剧情状态，供下一章参考
-                    append_chapter_summary(story_state, i, text, states)
-                    # 登记正典事实（死亡/麦高芬取得）并持久化
-                    try:
-                        canon.establish_from_chapter(text, i, self._states, alive_checker)
-                        canon.save_into(story_state)
-                    except Exception:
-                        pass
-                    # P0: 记录文本指纹 + P2: 标注已使用场景
-                    try:
-                        from .prose_renderer import fingerprint_text
-                        fps = fingerprint_text(text)
-                        story_state.setdefault("used_fingerprints", []).extend(fps)
-                        syn = text[:120].replace("\n", " ")
-                        story_state.setdefault("used_scenes", "")
-                        story_state["used_scenes"] = story_state["used_scenes"][:1500] + f"\n第{i}章已写场景：{syn}"
-                        # P6: 追踪高频短语
-                        from .prose_renderer import track_repeated_phrases
-                        new_phrases = track_repeated_phrases(text)
-                        existing = set(story_state.get("tracked_phrases", []))
-                        existing.update(new_phrases)
-                        story_state["tracked_phrases"] = list(existing)[:8]
-                    except Exception:
-                        pass
-                    # 持久化故事状态到 SQLite，暂停/重启不丢失
-                    try:
-                        data = self.store.get(self.session.id)
-                        cfg = (data or {}).get("config_json", {}) or {}
-                        if isinstance(cfg, str):
-                            cfg = _json.loads(cfg)
-                        cfg["story_state"] = story_state
-                        self.store.update(self.session.id, config_json=_json.dumps(cfg, ensure_ascii=False))
-                    except Exception:
-                        pass
+                    self._record_chapter(i=i, text=text, story_state=story_state,
+                                         canon=canon, states=ci["states"], alive_checker=alive_checker)
                 else:
                     full_parts.append(f"第{i}章\n\n（正文生成失败，详细摘要见文件 {fname}）")
                 self._log("report", f"第{i}/{n}章已生成并保存（{len(text)} 字）→ {fname}")
