@@ -284,6 +284,53 @@ class DeductionGraphStore:
         return [{"source": r[0] or "?", "action": r[1] or "", "description": str(r[2] or "")[:120],
                  "round": r[3] if r[3] is not None else 0} for r in rows]
 
+    def get_causal_graph(self, limit: int = 300) -> dict[str, list[dict[str, Any]]]:
+        """从 Agent-[ACTED]->Event 构建因果/行动图（节点+边），供前端 3D 图渲染。
+
+        - Agent 节点(kind=agent) / Event 节点(kind=event)
+        - ACTED 边：agent → event（谁执行了该事件）
+        - 交互边：event → 目标 Agent（当 Event.target_id 匹配到已知智能体时）
+        事件按轮次升序取前 limit 条，防止长会话节点过多。
+        """
+        rows = self.query(
+            f"MATCH (a:{self.AGENT_TABLE})-[r:ACTED]->(ev:{self.EVENT_TABLE}) "
+            "RETURN a.id, a.name, ev.id, ev.description, ev.event_type, r.action, "
+            "ev.round, ev.driver, ev.effect, ev.target_id "
+            f"ORDER BY ev.round LIMIT {int(limit)}"
+        )
+        nodes: list[dict[str, Any]] = []
+        links: list[dict[str, Any]] = []
+        agent_ids: dict[str, str] = {}   # id -> name
+        seen_nodes: set[str] = set()
+
+        def _add_node(nid: str, kind: str, label: str, desc: str = "") -> None:
+            if nid and nid not in seen_nodes:
+                seen_nodes.add(nid)
+                nodes.append({"id": nid, "kind": kind, "label": label or nid[:8], "desc": desc})
+
+        # 第一遍：收集智能体 id→name，便于交互边解析
+        for r in rows:
+            if r[0]:
+                agent_ids[r[0]] = r[1] or str(r[0])[:8]
+
+        for r in rows:
+            aid, aname, eid = r[0], r[1] or "", r[2]
+            desc, etype, action = str(r[3] or ""), str(r[4] or ""), str(r[5] or "")
+            rnd, driver, effect, target_id = r[6], str(r[7] or ""), str(r[8] or ""), r[9]
+            if not aid or not eid:
+                continue
+            _add_node(aid, "agent", aname)
+            ev_label = (desc[:36] or etype or "事件")
+            ev_desc = f"第{rnd if rnd is not None else '?'}轮" + (f"·{driver}" if driver else "") + (f" {effect}" if effect else "")
+            _add_node(eid, "event", ev_label, ev_desc.strip())
+            links.append({"source": aid, "target": eid, "type": "acted", "label": action or etype})
+            # 交互边：事件指向目标智能体（仅当目标是已知智能体，避免悬空边）
+            if target_id and target_id in agent_ids and target_id != aid:
+                _add_node(target_id, "agent", agent_ids[target_id])
+                links.append({"source": eid, "target": target_id, "type": "target", "label": "作用于"})
+
+        return {"nodes": nodes, "links": links}
+
     def export_graph_data(self) -> dict[str, Any]:
         self._check_conn()
         nodes: list[dict[str, Any]] = []
