@@ -4,6 +4,7 @@ from literarycreation.engine.canon import CanonLedger
 from literarycreation.engine.prose_renderer import (
     build_pov_text,
     build_reveal_text,
+    build_style_migration,
     get_technique,
     pov_allows_switch,
 )
@@ -102,5 +103,22 @@ assert "视角约束" in tech, "单视角应注入视角约束"
 tech_multi = get_technique(3, 20, allow_pov_switch=True)
 assert "视角约束" not in tech_multi
 print("pov/reveal/technique OK")
+
+
+# ── 4. detected_style + 风格迁移 ──
+bp2 = normalize_blueprint(
+    {"logline": "x", "detected_style": "悬疑",
+     "key_events": [{"round": 1, "event": "e"}], "characters": [{"name": "A"}]}, 10)
+assert bp2["detected_style"] == "悬疑", bp2.get("detected_style")
+# 迁移在 70% 章处收敛到 100%
+m1 = build_style_migration("悬疑", "浪漫主义", 1, 10)
+m7 = build_style_migration("悬疑", "浪漫主义", 7, 10)
+m10 = build_style_migration("悬疑", "浪漫主义", 10, 10)
+assert "浪漫主义" in m1 and "悬疑" in m1
+assert "完全贴合" in m7, "第7章(70%)应已收敛到目标"
+assert "完全贴合" in m10
+assert build_style_migration("悬疑", "悬疑", 3, 10) == "", "风格相同不迁移"
+assert build_style_migration("", "浪漫主义", 3, 10) == "", "无检测风格不迁移"
+print("detected_style/style-migration OK")
 
 print("\nALL BLUEPRINT+CANON SMOKE TESTS PASSED")

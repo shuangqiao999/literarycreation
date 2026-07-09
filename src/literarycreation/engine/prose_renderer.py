@@ -125,6 +125,27 @@ def build_reveal_text(outline: dict[str, Any] | None, chapter_idx: int) -> str:
             f"严禁提前泄露后续章节才应揭晓的真相】")
 
 
+def build_style_migration(detected: str, target: str, chapter_idx: int, total_chapters: int) -> str:
+    """手选风格与素材原生风格冲突时，逐章渐进迁移。
+
+    迁移在 ~70% 章处收敛到 100%（末段稳定贴合目标，避免只在末章突变）。
+    """
+    detected = (detected or "").strip()
+    target = (target or "").strip()
+    if not detected or not target or detected == target:
+        return ""
+    import math
+    converge_at = max(1, math.ceil(total_chapters * 0.7))
+    ratio = min(1.0, chapter_idx / converge_at)
+    pct = int(round(ratio * 100))
+    if pct >= 100:
+        return (f"【风格过渡】本作最终风格为「{target}」。本章应已完全贴合「{target}」，"
+                f"不再保留「{detected}」的痕迹。")
+    return (f"【风格过渡】本作目标风格为「{target}」，素材原生风格偏「{detected}」。"
+            f"本章为第{chapter_idx}/{total_chapters}章，过渡进度约 {pct}%：在保留「{detected}」质感的"
+            f"基础上，让语气、意象、节奏向「{target}」倾斜约 {pct}%；越往后越贴近「{target}」，收尾完全贴合。")
+
+
 # ── P6: 短语追踪 ──
 
 def track_repeated_phrases(text: str, top_n: int = 5) -> list[str]:

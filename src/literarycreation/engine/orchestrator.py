@@ -62,6 +62,9 @@ class DeductionOrchestrator:
         self._target_words: int = 0
         self._canon_retries: int = 2
         self._auto_blueprint: bool = True
+        self._style_mode: str = "manual"
+        self._base_domain: str = "literary_realism"
+        self._selected_style: str = ""
 
     async def run(self) -> DeductionSession:
         import time as _time
@@ -184,11 +187,21 @@ class DeductionOrchestrator:
             self._canon_retries = 2
 
         # 2. 恢复规则包
-        domain = (cfg.get("domain") or "").strip()
+        raw_domain = (cfg.get("domain") or "").strip()
+        if raw_domain == "auto":
+            self._style_mode = "auto"
+            self._base_domain = "literary_realism"
+            self._selected_style = ""
+        else:
+            self._style_mode = "manual"
+            self._base_domain = raw_domain or "literary_realism"
+        domain = self._base_domain
         if domain:
             from .rule_engine import RuleEngine
             try:
                 self._rule_engine = RuleEngine.from_domain(domain)
+                if self._style_mode == "manual":
+                    self._selected_style = str(self._rule_engine.pack.get("style", "") or "")
                 self._log("orchestrator",
                           f"恢复规则包: {self._rule_engine.pack.get('display_name', domain)}")
             except Exception as e:
@@ -284,11 +297,22 @@ class DeductionOrchestrator:
         except (TypeError, ValueError):
             self._canon_retries = 2
 
-        domain = (cfg.get("domain") or "literary_realism").strip()
+        raw_domain = (cfg.get("domain") or "literary_realism").strip()
+        if raw_domain == "auto":
+            self._style_mode = "auto"
+            self._base_domain = "literary_realism"
+            self._selected_style = ""
+        else:
+            self._style_mode = "manual"
+            self._base_domain = raw_domain
+        domain = self._base_domain
         from .rule_engine import RuleEngine
         try:
             self._rule_engine = RuleEngine.from_domain(domain)
-            self._log("quantify", f"阶段1.5: 使用领域规则包: {self._rule_engine.pack.get('display_name', domain)}")
+            if self._style_mode == "manual":
+                self._selected_style = str(self._rule_engine.pack.get("style", "") or "")
+            self._log("quantify", f"阶段1.5: 使用领域规则包: {self._rule_engine.pack.get('display_name', domain)}"
+                      + (f" (风格模式: {'自动' if self._style_mode == 'auto' else '手动/' + self._selected_style})"))
         except Exception as e:
             logger.warning("[Orchestrator] 规则包加载失败: %s", e)
             self._rule_engine = None
@@ -318,15 +342,16 @@ class DeductionOrchestrator:
         cfg = (data or {}).get("config_json", {}) or {}
         if isinstance(cfg, str):
             cfg = _json.loads(cfg)
-        domain = (cfg.get("domain") or "literary_realism").strip()
 
         from .blueprint import generate_blueprint
         self._log("blueprint", "阶段1.6: 故事蓝图生成开始")
         blueprint = await generate_blueprint(
             self.session.source_material,
-            domain=domain,
+            domain=getattr(self, "_base_domain", "literary_realism"),
             total_rounds=self.session.total_rounds,
             target_words=self._target_words,
+            style_mode=getattr(self, "_style_mode", "manual"),
+            target_style=getattr(self, "_selected_style", ""),
             log_fn=self._log,
         )
         if not blueprint:
@@ -604,13 +629,26 @@ class DeductionOrchestrator:
         from .canon import CanonLedger
 
         rounds = list(getattr(self, "_simulation_rounds", []))
-        style = getattr(self, "_style", "现实主义")
-        # 优先从规则包读取风格（domain 决定 style），config.style 作为可选的覆盖
-        if self._rule_engine is not None and hasattr(self._rule_engine, "pack"):
-            pack_style = self._rule_engine.pack.get("style")
-            if pack_style:
-                style = str(pack_style)
         outline = getattr(self, "_outline", None)
+
+        # ── 生效风格解析：自动=素材检测风格；手选=所选风格（冲突时逐章迁移）──
+        style_mode = getattr(self, "_style_mode", "manual")
+        detected_style = str((outline or {}).get("detected_style", "") or "").strip()
+        selected_style = getattr(self, "_selected_style", "") or ""
+        if not selected_style and self._rule_engine is not None and hasattr(self._rule_engine, "pack"):
+            selected_style = str(self._rule_engine.pack.get("style", "") or "")
+        if style_mode == "auto":
+            style = detected_style or selected_style or "现实主义"
+            migrate = False
+        else:
+            style = selected_style or "现实主义"
+            migrate = bool(detected_style and detected_style != style)
+        self._migrate_style = migrate
+        self._detected_style = detected_style
+        self._log("report",
+                  f"生效写作风格: {style}（模式={'自动' if style_mode == 'auto' else '手动'}"
+                  + (f"，素材风格={detected_style}，逐章向目标迁移" if migrate else "") + "）")
+
         target_words = int(getattr(self, "_target_words", 0) or 0)
 
         # 关键事件按轮次索引（Mode 2）
@@ -703,12 +741,19 @@ class DeductionOrchestrator:
                     build_phrase_hint,
                     build_pov_text,
                     build_reveal_text,
+                    build_style_migration,
                     get_technique,
                     pov_allows_switch,
                 )
                 technique = get_technique(i, n, allow_pov_switch=pov_allows_switch(outline))
                 if technique:
                     story_ctx = f"【本章叙事技巧指导】{technique}\n\n" + story_ctx
+
+                # 风格迁移（手选风格与素材原生风格冲突时，逐章向目标靠拢）
+                if getattr(self, "_migrate_style", False):
+                    mig = build_style_migration(getattr(self, "_detected_style", ""), style, i, n)
+                    if mig:
+                        story_ctx = mig + "\n\n" + story_ctx
 
                 # 正典一致性约束 + POV 锁定 + 揭示层级（蓝图守卫）
                 canon_ctx = canon.build_constraint_text(current_round=i)

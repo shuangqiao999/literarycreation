@@ -667,6 +667,7 @@ export default function App() {
             title="叙事风格"
             style={{ height: 32, marginBottom: 6, width: "100%", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, fontSize: 13 }}
           >
+            <option value="auto">🔍 自动（按素材判定风格）</option>
             {domains.length > 0
               ? domains.map(d => <option key={d.domain} value={d.domain}>{d.name}</option>)
               : [
