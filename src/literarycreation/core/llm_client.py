@@ -5,13 +5,13 @@ Only implements what the deduction engine actually uses: chat().
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 import time
 from dataclasses import dataclass
 
 import httpx
 
-from .config import config
 from .token_counter import TokenStats
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ class DeductionLLMClient:
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(120.0),
+                timeout=httpx.Timeout(None, connect=30.0),
                 headers=headers,
             )
 
@@ -96,6 +96,8 @@ class DeductionLLMClient:
             "model": self.model,
             "messages": full_messages,
             "temperature": temperature,
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if max_tokens:
             payload["max_tokens"] = max_tokens
@@ -103,14 +105,42 @@ class DeductionLLMClient:
 
         t0 = time.monotonic()
         try:
-            resp = await self._http.post(
-                f"{self.api_base}/chat/completions", json=payload
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            content_parts: list[str] = []
+            usage: dict = {}
+            # 事件驱动：逐块接收 SSE，直至 [DONE]；无生成总超时
+            async with self._http.stream(
+                "POST", f"{self.api_base}/chat/completions", json=payload
+            ) as resp:
+                resp.raise_for_status()
+                async for raw_line in resp.aiter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str:
+                        continue
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = _json.loads(data_str)
+                    except ValueError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        piece = delta.get("content")
+                        if piece:
+                            content_parts.append(piece)
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+            content = "".join(content_parts)
             elapsed_ms = int((time.monotonic() - t0) * 1000)
-            content = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
+            if not usage:
+                # 兜底：流式响应未返回 usage 时按字数估算（中文约 1.6 tokens/字）
+                est = int(len(content) * 1.6)
+                usage = {"completion_tokens": est, "total_tokens": est}
             stats = TokenStats(
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
@@ -119,7 +149,7 @@ class DeductionLLMClient:
                 duration_ms=elapsed_ms,
             )
             # Auto-accumulate if context is set
-            from .token_counter import _current_session, _current_phase, _current_round, accumulator
+            from .token_counter import _current_phase, _current_round, _current_session, accumulator
             sid = _current_session.get()
             if sid:
                 accumulator.record(sid, _current_phase.get(), _current_round.get(), stats)
