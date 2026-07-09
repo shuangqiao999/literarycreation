@@ -1606,7 +1606,7 @@ export default function App() {
                   <button onClick={fetchModels} disabled={cfgFetchingModels} style={{ ...btn, background: "#334155", color: "#e2e8f0" }}>{cfgFetchingModels ? "获取中..." : "拉取模型列表"}</button>
                 </div>
               </>
-            ) : (
+            ) : settingsTab === "embed" ? (
               <>
                 <label style={lbl}>服务商</label>
                 <select value={cfgEmbedProvider} onChange={e => { setCfgEmbedProvider(e.target.value); const p = cfgProviders.find(x => x.slug === e.target.value); if (p?.default_llm_base_url) { setCfgEmbedBase(p.default_llm_base_url); } }} style={{ ...inp, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6 }}>
@@ -1626,7 +1626,7 @@ export default function App() {
                   <button onClick={fetchModels} disabled={cfgFetchingModels} style={{ ...btn, background: "#334155", color: "#e2e8f0" }}>{cfgFetchingModels ? "获取中..." : "拉取模型列表"}</button>
                 </div>
               </>
-            )}
+            ) : null}
 
             {/* LLM Model list */}
             {settingsTab === "llm" && cfgLLMFetchedModels.length > 0 && (
