@@ -446,7 +446,7 @@ async def get_report(session_id: str, request: Request):
 
 
 @router.get("/session/{session_id}/logs")
-async def get_logs(session_id: str, limit: int = Query(200), request: Request = None):
+async def get_logs(session_id: str, limit: int = Query(-1), request: Request = None):
     engine = _get_engine(request)
     return engine.get_logs(session_id, limit=limit)
 
@@ -497,7 +497,7 @@ async def stream_deduction(session_id: str, request: Request):
             return
 
         # Push existing logs on connect so the frontend can catch up
-        existing = engine.get_logs(session_id, limit=200)
+        existing = engine.get_logs(session_id, limit=-1)
         for log_entry in existing:
             last_log_id = max(last_log_id, log_entry.get("id", 0))
             yield f"data: {json.dumps(log_entry, ensure_ascii=False)}\n\n"
@@ -518,7 +518,7 @@ async def stream_deduction(session_id: str, request: Request):
             ev.clear()
 
             # ── push new log entries ──
-            logs = engine.get_logs(session_id, limit=100)
+            logs = engine.get_logs(session_id, limit=-1)
             new_logs = [l for l in logs if l.get("id", 0) > last_log_id]
             for log_entry in new_logs:
                 last_log_id = max(last_log_id, log_entry.get("id", 0))

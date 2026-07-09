@@ -165,7 +165,7 @@ class SessionStore:
             )
             conn.commit()
 
-    def get_logs(self, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    def get_logs(self, session_id: str, limit: int = -1) -> list[dict[str, Any]]:
         with self._get_conn() as conn:
             rows = conn.execute(
                 "SELECT id, phase, message, timestamp FROM deduction_logs "
