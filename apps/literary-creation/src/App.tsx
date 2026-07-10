@@ -65,7 +65,7 @@ interface ReportData {
   style?: string;
   arc_alignment?: Array<{ name: string; win_score: number; final_metrics: Record<string, number>; target: Record<string, number> }>;
   key_events_plan?: Array<{ round: number; event: string }>;
-  chapters?: Array<{ index: number; title: string; file: string; words: number }>;
+  chapters?: Array<{ index: number; title: string; file: string; words: number; canon_conflicts?: string[] }>;
   work_dir?: string;
   target_words?: number;
 }
@@ -950,9 +950,16 @@ export default function App() {
                           )}
                           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                             {report.chapters.map(ch => (
-                              <div key={ch.index} style={{ fontSize: 12, color: "#cbd5e1", background: "#0f172a", borderRadius: 4, padding: "4px 8px", display: "flex", justifyContent: "space-between" }}>
-                                <span>{ch.title} · {ch.file}</span>
-                                <span style={{ color: "#64748b" }}>{ch.words} 字</span>
+                              <div key={ch.index}>
+                                <div style={{ fontSize: 12, color: "#cbd5e1", background: "#0f172a", borderRadius: 4, padding: "4px 8px", display: "flex", justifyContent: "space-between" }}>
+                                  <span>{ch.title} · {ch.file}</span>
+                                  <span style={{ color: "#64748b" }}>{ch.words} 字</span>
+                                </div>
+                                {ch.canon_conflicts && ch.canon_conflicts.length > 0 && (
+                                  <div style={{ fontSize: 11, color: "#f87171", padding: "2px 8px 4px", borderLeft: "2px solid #ef4444", marginLeft: 4 }}>
+                                    ⚠ 正典冲突（{ch.canon_conflicts.length} 处）：{ch.canon_conflicts.map(c => c.slice(0, 60)).join("；")}
+                                  </div>
+                                )}
                               </div>
                             ))}
                           </div>

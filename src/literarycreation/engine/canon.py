@@ -135,6 +135,9 @@ class CanonLedger:
                     continue
                 if any(ctx in s for ctx in _DEATH_CONTEXT):
                     continue  # 回忆/尸体/假设等语境，放行
+                # 激进豁免：本句不包含任何活人动作动词 → 不是复活场景，放行
+                if not any(v in s for v in _LIVING_VERBS):
+                    continue
                 # name 之后紧跟活人谓词 → 视为复活
                 idx = s.find(name)
                 tail = s[idx + len(name): idx + len(name) + 8]
@@ -281,3 +284,24 @@ class CanonLedger:
         })
         # 上限保护
         story_state["scene_features"] = story_state["scene_features"][-40:]
+
+    def postprocess_resurrections(self, text: str) -> tuple[str, int]:
+        """替换式后处理：将已死角色后的活人动词替换为回忆/生前状语。
+
+        例如 "师父说道…" → "师父生前曾说道…"，"师父站起身" → "（记忆中）师父站起身…"。
+        纯规则无 LLM，返回 (处理后的文本, 替换次数)。
+        """
+        if not self.dead or not text:
+            return text, 0
+        import re as _re
+        changes = 0
+        for name in sorted(self.dead.keys(), key=len, reverse=True):
+            for v in _LIVING_VERBS:
+                pat = _re.compile(_re.escape(name) + r"\s*" + _re.escape(v))
+                new_text, n = pat.subn(name + "（生前曾）" + v, text)
+                if n:
+                    text = new_text
+                    changes += n
+                    if changes > 50:
+                        return text, changes
+        return text, changes

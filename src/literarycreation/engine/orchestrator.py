@@ -63,6 +63,7 @@ class DeductionOrchestrator:
         self._canon_retries: int = 2
         self._scene_retries: int = 2
         self._auto_blueprint: bool = True
+        self._last_canon_conflicts: list[str] = []
         self._style_mode: str = "manual"
         self._base_domain: str = "literary_realism"
         self._selected_style: str = ""
@@ -812,6 +813,7 @@ class DeductionOrchestrator:
             )
 
         is_fallback = "正文生成失败" in text[:50]
+        ccu: list[str] = []
         # 正典一致性校验 → 冲突则自动重写
         if not is_fallback and self._canon_retries > 0:
             attempt = 0
@@ -820,7 +822,7 @@ class DeductionOrchestrator:
                 attempt += 1
                 self._log("report",
                           f"第{i}章检测到 {len(conflicts)} 处正典冲突，第 {attempt} 次自动重写")
-                fix_ctx = ("【一致性修正 — 上一稿存在下列冲突，请重写本章以彻底消除，"
+                fix_ctx = ("【一致性修正 — 上一稿存在下列事实冲突，请重写本章以彻底消除，"
                            "不得保留矛盾情节】\n"
                            + "\n".join(f"- {c}" for c in conflicts)
                            + "\n\n" + story_ctx)
@@ -830,9 +832,20 @@ class DeductionOrchestrator:
                     break
                 conflicts = canon.validate(text, current_round=i)
             if conflicts:
+                # 强提示 + 替代式后处理赎战（无额外 LLM 调用）
                 self._log("report",
-                          f"第{i}章仍存在 {len(conflicts)} 处正典冲突（已达重写上限），保留当前稿并记录警告")
+                          f"第{i}章仍存在 {len(conflicts)} 处正典冲突（已达重写上限），执行替换式后处理")
                 logger.warning("[Orchestrator] 第%d章未消除的正典冲突: %s", i, conflicts)
+                text, rep = canon.postprocess_resurrections(text)
+                if rep > 0:
+                    self._log("report", f"第{i}章替换式后处理：修正 {rep} 处复活表述")
+                    # 后处理后再次校验
+                    conflicts = canon.validate(text, current_round=i)
+                    if conflicts:
+                        self._log("report",
+                                  f"第{i}章后处理后仍有 {len(conflicts)} 处冲突，记录")
+                if conflicts:
+                    ccu = list(conflicts)
 
         # 场景去重（独立于正典的重写预算）
         is_fallback = "正文生成失败" in text[:50]
@@ -877,7 +890,10 @@ class DeductionOrchestrator:
                 post = canon.validate(text, current_round=i)
                 if post:
                     logger.warning("[Orchestrator] 第%d章扩写后仍存正典风险: %s", i, post)
+                if post:
+                    ccu = list(post)
 
+        self._last_canon_conflicts = ccu
         return text
 
     def _record_chapter(
@@ -1006,7 +1022,9 @@ class DeductionOrchestrator:
 
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 _write(fname, text)
-                chapters_meta.append({"index": i, "title": f"第{i}章", "file": fname, "words": len(text)})
+                chapters_meta.append({"index": i, "title": f"第{i}章", "file": fname,
+                                       "words": len(text),
+                                       "canon_conflicts": self._last_canon_conflicts})
 
                 is_fallback = "正文生成失败" in text[:50]
                 if not is_fallback:
