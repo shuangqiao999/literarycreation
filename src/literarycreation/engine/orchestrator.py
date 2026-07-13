@@ -692,9 +692,11 @@ class DeductionOrchestrator:
         # 角色人格
         persona_lines = []
         for a in (self._agents or []):
-            persona_lines.append(f"- {a.name}（{a.persona[:60]}）")
+            ss = getattr(a, "speech_style", "")
+            ss_hint = f" | 说话风格：{ss}" if ss else ""
+            persona_lines.append(f"- {a.name}（{a.persona[:60]}{ss_hint}）")
         if persona_lines:
-            story_ctx = ("【角色语言特征 — 每个角色说话应符合其人格】\n"
+            story_ctx = ("【角色语言特征 — 每个角色说话应符合其人格与对话风格】\n"
                          + "\n".join(persona_lines) + "\n\n" + story_ctx)
         # 叙事阶段 + 技巧
         from .prose_renderer import (

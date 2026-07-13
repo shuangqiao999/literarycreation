@@ -136,12 +136,15 @@ class StrategicReasoner:
                 header += f"\n## 【本轮必须推动的剧情】\n{event_mandate}\n"
             correction_directive = ""
             if correction_level == "soft":
-                correction_directive = "【注意】当前剧情走向与提纲目标略有偏离，请在决策中优先靠近目标方向。"
+                correction_directive = ("【内心之声】你隐约感到自己正在偏离预设的路径。"
+                                       "继续向前——还是回头？这道选择题本身，就是你的故事。")
             elif correction_level == "strong":
-                correction_directive = "【强制引导】当前剧情已偏离提纲目标。你的决策必须优先推动剧情回到目标轨迹。"
+                correction_directive = ("【内心之声（强）】走得越远，回去越难。"
+                                       "但如果偏离本身就是命运的安排——你愿意付出什么代价来坚持自己的选择？")
             elif correction_level == "event_inject":
                 correction_directive = (
-                    "【强剧情推力】系统检测到重大偏离。以下外部事件将迫使剧情转向，请围绕此事件做出反应。\n"
+                    "【命运的齿轮】不是所有偏离都能回头。新的力量已经介入，"
+                    "无论你是否准备好——世界已经改变了。请对此做出反应。\n"
                     f"外部事件：{event_mandate or '重大事件发生'}"
                 )
             if correction_directive:
@@ -218,6 +221,8 @@ _FREE_SPEC = """## 输出 JSON（仅 JSON，无解释）
   "action_type": "你的具体行动描述（自由文本，如'潜入档案室寻找证据'、'向陆远坦白自己对师父之死的怀疑'）",
   "target": "行动的涉及对象或留空",
   "intensity": 0.0到1.0,
-  "rationale": "20-50字理由"
+  "rationale": "20-50字理由",
+  "inner_monologue": "30-80字内心独白，以角色第一人称写出当下最真实、最隐秘的想法",
+  "scene_moment": "50-120字叙事片段，用第三人称写出本行动的关键瞬间（动作+对白+氛围）"
 }
 ```"""

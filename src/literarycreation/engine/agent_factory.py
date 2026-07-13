@@ -39,7 +39,8 @@ $keywords
 {
   "persona": "详细的人格描述 (80-150字), 包括性格特征、价值观、行为模式、人物弧光演变",
   "background": "背景故事 (80-150字), 包括关键经历、社会关系、动机、性格变迁",
-  "goals": ["目标1", "目标2", "目标3"]
+  "goals": ["目标1", "目标2", "目标3"],
+  "speech_style": "10-30字说话风格：用词习惯、自称偏好、句式特征（如'每句话不超过10字'、'喜欢用反问句'、'从不直接表态'）"
 }
 
 【重要】只返回纯JSON对象。不要```json代码块。不要任何解释文字。"""
@@ -187,6 +188,7 @@ async def create_agents_from_graph(
                     "persona": f"{person_name}是一个参与事件的独立个体",
                     "background": "来自原文背景",
                     "goals": ["参与互动", "表达观点"],
+                    "speech_style": "",
                 }
         except Exception as e:
             logger.warning("[Deduction] Agent persona gen failed for %s: %s", person_name, e)
@@ -194,6 +196,7 @@ async def create_agents_from_graph(
                 "persona": f"{person_name}是一个参与事件的独立个体",
                 "background": "来自原文背景",
                 "goals": ["参与互动", "表达观点"],
+                "speech_style": "",
             }
 
         agent_profile = DeductionAgentProfile(
@@ -202,6 +205,7 @@ async def create_agents_from_graph(
             persona=profile_data.get("persona", ""),
             background=profile_data.get("background", ""),
             goals=profile_data.get("goals", []),
+            speech_style=profile_data.get("speech_style", ""),
         )
         agents.append(agent_profile)
 
@@ -220,7 +224,6 @@ async def create_agents_from_graph(
 def _parse_persona_json(raw: str) -> dict[str, Any]:
     data = _try_extract_json(raw)
     if not isinstance(data, dict):
-        # LLM returned array — take first element
         if isinstance(data, list) and data and isinstance(data[0], dict):
             data = data[0]
         else:
@@ -229,6 +232,7 @@ def _parse_persona_json(raw: str) -> dict[str, Any]:
         "persona": data.get("persona", ""),
         "background": data.get("background", ""),
         "goals": data.get("goals", []),
+        "speech_style": data.get("speech_style", ""),
     }
 
 

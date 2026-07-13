@@ -541,6 +541,26 @@ class ProseRenderer:
 
         if ctx_block:
             ev_parts.insert(0, ctx_block)
+
+        # 从事件中提取叙事片段素材，优先作为场景骨架
+        scene_fragments: list[str] = []
+        for e in round_events:
+            if "[场景]" in e:
+                frag = e.split("[场景]", 1)[-1].strip()[:150]
+                if frag:
+                    scene_fragments.append(frag)
+            elif "[内心]" in e:
+                frag = e.split("[内心]", 1)[-1].strip()[:80]
+                if frag:
+                    scene_fragments.append(f"（内心）{frag}")
+        if len(scene_fragments) >= 2:
+            scene_block = (
+                "【以下为已确定的场景素材——请按时间线拼接并进行文学性润色，"
+                "不得修改关键事实，但可以丰富场景描写、对话活动和心理活动】\n"
+                + "\n".join(f"{j+1}. {s}" for j, s in enumerate(scene_fragments))
+            )
+            ev_parts.insert(0, scene_block)
+
         events_txt = "\n".join(f"- {p}" for p in ev_parts) or "（承接前文自然推进）"
 
         length_req = (f"本章篇幅约 {target_words} 字（可上下浮动 15%）。"

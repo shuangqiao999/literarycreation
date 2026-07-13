@@ -76,6 +76,26 @@ class SimulationEngine:
         self._max_concurrent = max(1, max_concurrent)
         self._sem = asyncio.Semaphore(self._max_concurrent)
 
+        # 社会温度计：5个维度感知社会氛围（舆论/流言/派系/亲密压力/外部威胁）
+        self._social_thermometer: dict[str, float] = {
+            "public_opinion": 50.0,
+            "rumor_intensity": 30.0,
+            "faction_polarity": 40.0,
+            "intimate_pressure": 20.0,
+            "external_threat": 10.0,
+        }
+        # 行动类型 → 社会温度变化
+        self._SOCIAL_HEAT_MAP: dict[str, dict[str, float]] = {
+            "confront": {"faction_polarity": 8, "rumor_intensity": 5},
+            "betray": {"faction_polarity": 12, "intimate_pressure": 15, "rumor_intensity": 10},
+            "ally": {"faction_polarity": -5, "rumor_intensity": 3},
+            "confess": {"intimate_pressure": 10, "rumor_intensity": 5},
+            "investigate": {"rumor_intensity": 3, "external_threat": 2},
+            "protect": {"public_opinion": 5, "intimate_pressure": 5},
+            "manipulate": {"faction_polarity": 6, "rumor_intensity": 8},
+            "observe": {},
+        }
+
         from .narrative_memory import NarrativeMemoryStore
         self.narrative_memory = NarrativeMemoryStore(cap=8)
 
@@ -335,6 +355,18 @@ class SimulationEngine:
                     f"你的 {action} 自身效应: {summary}"
                 )
 
+        # 更新社会温度计（根据本回合发生的所有公开行动）
+        for dec in decisions:
+            at = dec.get("action_type", "")
+            if at in self._SOCIAL_HEAT_MAP:
+                for k, v in self._SOCIAL_HEAT_MAP[at].items():
+                    self._social_thermometer[k] = max(0.0, min(100.0,
+                        self._social_thermometer.get(k, 50.0)
+                        + v * float(dec.get("intensity", 0.5))))
+            # 无匹配动作：自然衰减
+            for k in ("rumor_intensity", "faction_polarity"):
+                self._social_thermometer[k] = max(0.0, self._social_thermometer.get(k, 50.0) - 1.0)
+
         for dec in decisions:
             for action, sub_intensity, _target in re_engine._iter_subactions(dec):
                 delay_cfg = re_engine.pack.get("delay_effects", {}).get(action)
@@ -348,6 +380,12 @@ class SimulationEngine:
             agent = next((a for a in self.agents if a.entity_id == actor), None)
             name = agent.name if agent else actor[:8]
             content = dec.get("rationale", dec.get("content", ""))[:200]
+            scene = dec.get("scene_moment", "")
+            inner = dec.get("inner_monologue", "")
+            if inner:
+                content += f"\n[内心] {inner}"
+            if scene:
+                content += f"\n[场景] {scene}"
             sim_round.actions.append(SimulationAction(
                 agent_id=actor,
                 action_type=dec.get("action_type", "observe"),
@@ -375,8 +413,14 @@ class SimulationEngine:
 
         # 更新角色叙事记忆（亲身经历，供后续决策连贯参考）
         for action in sim_round.actions:
-            summary = f"第{round_number}轮：{action.action_type}" + (
-                f"（{action.content[:40]}）" if action.content else "")
+            # 优先用场景片段作为记忆摘要，回退到动作描述
+            scene_text = ""
+            if action.content:
+                if "[场景]" in action.content:
+                    scene_text = action.content.split("[场景]", 1)[-1].strip()[:80]
+                elif "[内心]" in action.content:
+                    scene_text = action.content.split("[内心]", 1)[-1].strip()[:60]
+            summary = scene_text if scene_text else f"第{round_number}轮：{action.action_type}"
             self.narrative_memory.add(action.agent_id, summary)
 
         # 写入 narrator 文本供 prose renderer
@@ -562,15 +606,23 @@ class SimulationEngine:
         return " · ".join(parts) if parts else ""
 
     def _env_context(self) -> str:
-        if not self._env:
-            return ""
-        parts = []
-        weather = self._env.get("weather", "").strip()
-        terrain = self._env.get("terrain", "").strip()
-        if weather:
-            parts.append(f"天气: {weather}")
-        if terrain:
-            parts.append(f"地形: {terrain}")
+        parts: list[str] = []
+        st = self._social_thermometer
+        if st.get("faction_polarity", 40) > 60:
+            parts.append("阵营之间的裂痕已肉眼可见，空气中弥漫着猜疑。")
+        if st.get("rumor_intensity", 30) > 50:
+            parts.append("流言如野火蔓延，每个人都在私下谈论同一件事。")
+        if st.get("intimate_pressure", 20) > 40:
+            parts.append("私人关系已成为公开的筹码，每一次对视都有代价。")
+        if st.get("external_threat", 10) > 30:
+            parts.append("外部威胁正在迫近，所有人心中都有一根弦在绷紧。")
+        if self._env:
+            weather = self._env.get("weather", "").strip()
+            terrain = self._env.get("terrain", "").strip()
+            if weather:
+                parts.append(f"天气: {weather}")
+            if terrain:
+                parts.append(f"地形: {terrain}")
         return "； ".join(parts) if parts else ""
 
     async def _narrate_round(self, client: Any, round_number: int,
