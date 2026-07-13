@@ -59,6 +59,11 @@ class DeductionLLMClient:
         self.api_key = api_key or resolved.get("api_key", "")
         self.model = model or resolved.get("model", "")
         self._http: httpx.AsyncClient | None = None
+        # 模型档位自适应
+        from .prompt_adapter import detect_tier, simplify_prompt, reduce_max_tokens
+        self._tier = detect_tier(self.model)
+        self._simplify = simplify_prompt
+        self._reduce_tokens = reduce_max_tokens
 
     async def _ensure_client(self):
         if self._http is None:
@@ -83,14 +88,19 @@ class DeductionLLMClient:
 
         full_messages: list[dict] = []
         if system:
+            system = self._simplify(system, self._tier)
             full_messages.append({"role": "system", "content": system})
         for m in messages:
             if isinstance(m, Message):
-                full_messages.append({"role": m.role, "content": m.content})
+                content = self._simplify(m.content, self._tier)
+                full_messages.append({"role": m.role, "content": content})
             elif isinstance(m, dict):
-                full_messages.append(m)
+                d = dict(m)
+                d["content"] = self._simplify(d.get("content", ""), self._tier)
+                full_messages.append(d)
             else:
-                full_messages.append({"role": "user", "content": str(m)})
+                content = self._simplify(str(m), self._tier)
+                full_messages.append({"role": "user", "content": content})
 
         payload: dict = {
             "model": self.model,
@@ -100,7 +110,7 @@ class DeductionLLMClient:
             "stream_options": {"include_usage": True},
         }
         if max_tokens:
-            payload["max_tokens"] = max_tokens
+            payload["max_tokens"] = self._reduce_tokens(max_tokens, self._tier)
         payload.update({k: v for k, v in kwargs.items() if v is not None})
 
         t0 = time.monotonic()

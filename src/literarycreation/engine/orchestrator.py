@@ -816,6 +816,11 @@ class DeductionOrchestrator:
             climax_ctx = self._climax_driver.build_text(i, canon, story_state)
             if climax_ctx:
                 story_ctx = climax_ctx + "\n\n" + story_ctx
+        # 结局章专属约束（最后3章）
+        if i >= max(1, n - 2) and i > 1:
+            ending_block = _build_ending_block(i, n)
+            if ending_block:
+                story_ctx = ending_block + "\n\n" + story_ctx
         # 短语避重
         phrase_hint = build_phrase_hint(story_state)
         if phrase_hint:
@@ -1143,10 +1148,15 @@ class DeductionOrchestrator:
 
                     # 文学质检：钩子/节奏/重量
                     from .prose_renderer import (
-                        _check_chapter_hook, _analyze_rhythm, _compute_chapter_weight)
+                        _check_chapter_hook, _check_opening_hook,
+                        _analyze_rhythm, _compute_chapter_weight)
                     hook = _check_chapter_hook(text)
                     if hook:
                         story_state["next_chapter_hint"] = hook
+                    ohook = _check_opening_hook(text)
+                    if ohook:
+                        story_state.setdefault("opening_hook_warnings", []).append(
+                            f"第{i}章: {ohook}")
                     rhythm = _analyze_rhythm(text)
                     ra = story_state.setdefault("rhythm_history", [])
                     ra.append(rhythm)
@@ -1198,13 +1208,44 @@ class DeductionOrchestrator:
             cw_data = story_state.get("chapter_weights", [])
             cw = cw_data[idx - 1] if idx <= len(cw_data) else 0.0
             try:
-                revised, changes = await rev_pipe.revise(
-                    DeductionLLMClient(), idx, ch_text, rfb, cw)
+                if idx == n:
+                    revised, changes = await rev_pipe.revise_final(
+                        DeductionLLMClient(), idx, ch_text)
+                else:
+                    revised, changes = await rev_pipe.revise(
+                        DeductionLLMClient(), idx, ch_text, rfb, cw)
                 if changes:
                     full_parts[idx - 1] = revised
                     self._log("report", f"第{idx}章经编辑修订（{';'.join(changes[:3])}）")
             except Exception:
                 pass
+
+        # 全局质检：角色出场 + 宏观节奏 + 意象
+        from .imagery_tracker import ImageryTracker
+        imagery = ImageryTracker()
+        for idx, ch_text in enumerate(full_parts, 1):
+            imagery.scan_chapter(ch_text, idx)
+        imagery_warnings = imagery.analyze_trajectories()
+        if imagery_warnings:
+            report_payload.setdefault("imagery_warnings", []).extend(imagery_warnings)
+
+        # 宏观节奏分析
+        rh = story_state.get("rhythm_history") or []
+        macro_warnings = _analyze_macro_rhythm(rh, n)
+        if macro_warnings:
+            report_payload.setdefault("macro_rhythm_warnings", []).extend(macro_warnings)
+
+        # 角色出场验证
+        appearance_warnings = _validate_character_appearances(
+            full_parts, outline, getattr(self, "_agents", []))
+        if appearance_warnings:
+            report_payload.setdefault("character_appearance_warnings", []).extend(
+                appearance_warnings)
+
+        # 章首钩子汇总
+        oh_warnings = story_state.get("opening_hook_warnings") or []
+        if oh_warnings:
+            report_payload.setdefault("opening_hook_warnings", []).extend(oh_warnings)
 
         prose = "\n\n".join(full_parts)
         # 合本
@@ -1246,3 +1287,84 @@ class DeductionOrchestrator:
             if idx < len(rounds):
                 return rounds[idx]
         return None
+
+
+def _build_ending_block(chapter_idx: int, total_chapters: int) -> str:
+    """结局章专属约束文本。"""
+    if chapter_idx == total_chapters:
+        return (
+            "【最终章 — 以下约束优先级最高】\n"
+            "1. 至少一个角色必须做出不可逆的决定。这个决定在逻辑上必然，在情感上意外。\n"
+            "2. 不要在结局解释一切。留一个未回答的问题——不是悬念，是余韵。\n"
+            "3. 最后一句话的重量等于整本书。不要用'从此' '故事就这样' 类收束词——用意象、用动作、用一个无法忘记的细节。\n"
+            "4. 如果前文有麦高芬——它必须被完整揭示或不可逆地改变。不能含糊过去。\n"
+            "5. 读者读完后应该感到的不是'结束了'，而是'这个故事的震动还在继续'。"
+        )
+    if chapter_idx == total_chapters - 1:
+        return (
+            "【倒数第二章 — 为结局做最后的蓄力】\n"
+            "1. 本章应在结尾处把所有的势能汇聚到一点——让读者清楚地感觉到'下一章就是结局'。\n"
+            "2. 最后一个配角在此表明最终立场。站队完成——下一章不再有新的立场变化。\n"
+            "3. 本章的结尾是一个不可逆的动作——而非对话或心理活动——指向最后一章。"
+        )
+    return ""
+
+
+def _analyze_macro_rhythm(rhythm_history: list[dict], total_chapters: int) -> list[str]:
+    """全局节奏分析。"""
+    if len(rhythm_history) < 3:
+        return []
+    warnings: list[str] = []
+    action_ratios = [r.get("action_ratio", 0.3) for r in rhythm_history]
+    for i in range(len(action_ratios) - 2):
+        if all(a < 0.15 for a in action_ratios[i:i + 3]):
+            warnings.append(
+                f"第{i+1}至{i+3}章连续 3 章动作密度偏低——读者可能失去耐心。")
+            break
+    for i in range(len(action_ratios) - 2):
+        if all(a > 0.35 for a in action_ratios[i:i + 3]):
+            warnings.append(
+                f"第{i+1}至{i+3}章连续 3 章高强度——读者可能情感疲劳。")
+            break
+    if len(action_ratios) >= 5:
+        import statistics
+        std = statistics.stdev(action_ratios)
+        if std < 0.06:
+            warnings.append("全书节奏过于均匀（标准差<0.06）。好小说的节奏应有起伏——暴风雨和宁静交替。")
+    return warnings
+
+
+def _validate_character_appearances(prose_chapters: list[str],
+                                     outline: dict | None,
+                                     agents: list) -> list[str]:
+    """校验角色出场次数是否符合蓝图。"""
+    if not outline or not outline.get("characters"):
+        return []
+    import re as _re
+    warnings: list[str] = []
+    for c in outline["characters"]:
+        name = c.get("name", "").strip()
+        if not name:
+            continue
+        last = int(c.get("last_appearance", 999) or 999)
+        appearances: list[int] = []
+        for idx, text in enumerate(prose_chapters, 1):
+            if name in text and _re.search(
+                f'{name}(道|说|问道|走|站|坐|看|指|拿|放|推|拉|笑|叹|摇|点)',
+                text
+            ):
+                appearances.append(idx)
+        if len(appearances) < 2:
+            continue
+        for i in range(len(appearances) - 1):
+            gap = appearances[i + 1] - appearances[i]
+            if gap > 3:
+                warnings.append(
+                    f"「{name}」在第{appearances[i]}章后消失 {gap} 章，"
+                    f"于第{appearances[i+1]}章重新出现。读者可能已忘记这个角色。")
+                break
+        if last < 999 and appearances and max(appearances) < last - 1:
+            warnings.append(
+                f"蓝图设定「{name}」last_appearance={last}，"
+                f"但实际最后出现是第{max(appearances)}章。")
+    return warnings

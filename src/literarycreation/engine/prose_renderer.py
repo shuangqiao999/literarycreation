@@ -347,6 +347,23 @@ def _check_chapter_hook(text: str) -> str | None:
     return ("【章尾钩子缺失】本章结尾缺乏吸引读者翻页的力量。" + advice + "。请在下一章的开篇以回响方式填补这一缺失。")
 
 
+def _check_opening_hook(text: str) -> str | None:
+    """检测章首200字是否有hook。无hook返回建议文本。"""
+    import re as _re
+    head = text[:200]
+    markers = [
+        (r'.{3}(?:道|说|问道|喊道|低声道).{0,20}[:：]', "以对话开篇——直接投入一个正在进行的关键对话"),
+        (r'(?:突然|猛然|猝不及防|毫无征兆)', "以意外开篇——打破读者的预期，暗示本章不会按常理出牌"),
+        (r'(?:风|雨|光|暗|冷|热|声音|气味)', "以感官细节开篇——从物理世界切入，让读者先'感觉到'再'读到'"),
+        (r'(?:尸体|血|枪|刀|剑|信|锁|门|灯|灰)', "以一个物件开篇——让一个具体的物品承载本章的悬念"),
+        (r'(?:已经|再也|从未|总是|一直|终于)', "以时间压力开篇——暗示某些事已经太迟、或正在逼近"),
+    ]
+    for pattern, advice in markers:
+        if _re.search(pattern, head):
+            return None
+    return ("【章首钩子缺失】本章开篇缺乏吸引读者的第一句话。" + advice + "。请在章首200字内注入一个钩子。")
+
+
 def _analyze_rhythm(text: str) -> dict[str, float]:
     """分析本章节奏：动作密度 vs 反思密度。"""
     sentences = [s.strip() for s in text.replace("\n","").split("。") if len(s.strip()) > 5]
