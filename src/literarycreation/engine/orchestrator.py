@@ -158,6 +158,16 @@ class DeductionOrchestrator:
                 }
                 for eid, st in states.items()
             }
+        # 追加 agent 演化数据（speech_style + 行为准则）
+        agents = getattr(self, "_agents", None)
+        if agents:
+            snapshot["agents"] = {}
+            for a in agents:
+                snapshot["agents"][a.entity_id] = {
+                    "name": a.name,
+                    "speech_style": getattr(a, "speech_style", ""),
+                    "system_prompt_extra": getattr(a, "system_prompt_extra", ""),
+                }
         # 追加情感投资数据
         sim = getattr(self, "_simulation_engine", None)
         if sim and hasattr(sim, "_emotional_investment"):
@@ -256,6 +266,15 @@ class DeductionOrchestrator:
             )
             self._agents = agents
             self.session.agent_count = len(agents)
+            # 恢复 agent 演化数据（speech_style + 行为准则）
+            saved_agents = (snapshot or {}).get("agents") or {}
+            for a in self._agents:
+                sa = saved_agents.get(a.entity_id)
+                if sa and isinstance(sa, dict):
+                    if sa.get("speech_style"):
+                        a.speech_style = sa["speech_style"]
+                    if sa.get("system_prompt_extra"):
+                        a.system_prompt_extra = sa["system_prompt_extra"]
         except Exception as e:
             logger.warning("[Orchestrator] 智能体重建失败: %s", e)
 
@@ -394,11 +413,24 @@ class DeductionOrchestrator:
         cfg["outline"] = blueprint
         self.store.update(self.session.id,
                           config_json=_json.dumps(cfg, ensure_ascii=False))
+        # 蓝图完整性校验
+        from .health_validator import validate_blueprint
+        missing = validate_blueprint(blueprint)
+        if missing:
+            self._log("blueprint", f"蓝图完整性警告: 缺失 {'; '.join(missing)}")
         self._log("blueprint", "阶段1.6: 故事蓝图已写入会话配置，将按蓝图执行写作")
 
     async def _phase2_graph(self) -> None:
         _current_phase.set("graph")
         self._check_cancel()
+        # 嵌入模型快速校验
+        from literarycreation.core.providers import ProviderRegistry
+        from literarycreation.core.config import config as forge_config
+        from .health_validator import validate_embedding_model
+        registry = ProviderRegistry(forge_config._get_data_dir())
+        emb = registry.resolve_for_embedding()
+        if emb.get("api_base") and emb.get("model_name"):
+            validate_embedding_model(emb["api_base"], emb["model_name"], log_fn=self._log)
         self._log("graph", "阶段2: GraphRAG 知识图谱构建开始")
 
         # 预处理: 语义分块 + 实体提取 + LanceDB 索引
@@ -576,7 +608,12 @@ class DeductionOrchestrator:
             stats = accumulator.get_session_stats(self.session.id)
             if stats:
                 self.store.update(self.session.id,
-                                  token_json=_json.dumps(stats, ensure_ascii=False))
+                                   token_json=_json.dumps(stats, ensure_ascii=False))
+
+            # 每 3 轮写一次检查点（防崩溃丢失全部进度）
+            if rnd % 3 == 0 and rnd < total_rounds:
+                self._save_pause_snapshot(self.session.id)
+                self._log("simulation", f"  已写入第 {rnd} 轮检查点")
 
         self._simulation_rounds = rounds
         self._log("simulation", f"模拟完成: {len(rounds)} 轮, "
@@ -1137,6 +1174,7 @@ class DeductionOrchestrator:
             enforcer = WordCountEnforcer(min_ratio=0.75)
             for i, rnd in enumerate(rounds, 1):
                 self._check_cancel()
+                self._log("report", f"正在渲染第{i}/{n}章...")
                 ci = self._assemble_story_ctx(
                     i=i, n=n, rnd=rnd, outline=outline, style=style,
                     story_state=story_state, canon=canon, ev_by_round=ev_by_round)

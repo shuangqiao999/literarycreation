@@ -195,6 +195,9 @@ class DeductionEngine:
             self.log(session_id, "orchestrator",
                       f"检测到暂停记录 (第 {resume_start_round} 轮), 从断点继续推演")
 
+        if not is_resume:
+            _warn_token_budget(session, self.log, session_id)
+
         orchestrator = DeductionOrchestrator(
             session=session,
             graph=graph,
@@ -238,6 +241,24 @@ class DeductionEngine:
             updated_at=data.get("updated_at", ""),
             error=data.get("error", ""),
         )
+
+
+def _warn_token_budget(session, log_fn, session_id) -> None:
+    """估判 token 预算并在超额时告警。"""
+    cfg = session.config if hasattr(session, "config") else {}
+    rounds = int(cfg.get("total_rounds", 10) or 10)
+    target_words = int(cfg.get("target_words", 0) or 0)
+    seed_len = len(session.source_material or "")
+    # 粗略估算：每章散文 2 tokens/字 + 每轮决策 500 tokens/角色
+    per_ch = target_words // rounds if target_words and rounds else 2000
+    agents = session.agent_count or 4
+    est_prompt = seed_len * 1.5 + rounds * agents * 800 + rounds * per_ch * 2
+    # 约 1 prompt token = 1.5 tokens
+    est_total = int(est_prompt * 1.8)
+    if est_total > 150_000:
+        log_fn("orchestrator",
+               f"[Token预算] 预估本次推演消耗 ~{est_total//1000}k tokens。"
+               f"建议减少章数或降低每章字数以控制成本。")
 
     def close(self) -> None:
         self.close_graph()
