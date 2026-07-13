@@ -80,6 +80,7 @@ class DeductionOrchestrator:
         self._target_words: int = 0
         self._canon_retries: int = 2
         self._scene_retries: int = 2
+        self._quality_warnings: list[str] = []  # 章节级质量警告，供API报告和重跑反馈
         self._auto_blueprint: bool = True
         self._last_canon_conflicts: list[str] = []
         self._style_mode: str = "manual"
@@ -539,6 +540,11 @@ class DeductionOrchestrator:
 
         rounds: list[SimulationRound] = []
         start_rnd = self._resume_start_round + 1
+        # 注入前次运行的质量警告作为本轮行为强化信号
+        if self._quality_warnings and start_rnd <= 3:
+            for w in self._quality_warnings[-3:]:
+                self._log("simulation",
+                          f"[质量反馈] 前次运行警告：{w[:80]}。本轮角色应做出更果断的选择。")
         for rnd in range(start_rnd, total_rounds + 1):
             if self._cancel is not None and self._cancel.is_set():
                 self._log("simulation", "推演收到取消信号，提前终止")
@@ -883,6 +889,9 @@ class DeductionOrchestrator:
                                   f"第{i}章后处理后仍有 {len(conflicts)} 处冲突，记录")
                 if conflicts:
                     ccu = list(conflicts)
+            if ccu:
+                self._quality_warnings.append(
+                    f"第{i}章：正典冲突未完全消除 — {'；'.join(c[:1] for c in ccu[:2])}")
 
         # 场景去重（独立于正典的重写预算）
         is_fallback = "正文生成失败" in text[:50]
@@ -904,8 +913,10 @@ class DeductionOrchestrator:
                 scene_conflicts = canon.detect_scene_repetition(text, i, story_state)
             if scene_conflicts:
                 self._log("report",
-                          f"第{i}章场景重复未消除（已达改写上限），保留当前稿")
+                           f"第{i}章场景重复未消除（已达改写上限），保留当前稿")
                 logger.warning("[Orchestrator] 第%d章场景重复: %s", i, scene_conflicts)
+                self._quality_warnings.append(
+                    f"第{i}章：场景与前章雷同未消除")
 
         # 字数硬约束
         is_fallback = "正文生成失败" in text[:50]
@@ -1056,6 +1067,13 @@ class DeductionOrchestrator:
                     renderer=renderer, i=i, n=n, ci=ci, story_ctx=ci["story_ctx"],
                     prev_tail=prev_tail, per_ch=per_ch, canon=canon, enforcer=enforcer,
                     story_state=story_state)
+
+                # 对话风格事后检测
+                from .prose_renderer import _check_dialogue_style
+                d_violations = _check_dialogue_style(text, self._agents, i)
+                for dv in d_violations:
+                    self._log("report", dv)
+                    self._quality_warnings.append(dv)
 
                 fname = f"{safe_title}_第{i:02d}章.txt"
                 _write(fname, text)

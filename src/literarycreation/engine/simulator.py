@@ -204,6 +204,7 @@ class SimulationEngine:
                     recent_events=recent, env_context=self._env_context(),
                     self_memory=kuzu_self,
                     narrative_memory=self._narrative_memory_text(agent.entity_id),
+                    knowledge_gaps=(self._outline or {}).get("knowledge_gaps", []),
                 )
             if dec:
                 dec["actor_id"] = agent.entity_id
@@ -281,6 +282,7 @@ class SimulationEngine:
                     recent_events=recent, env_context=self._env_context(),
                     self_memory=kuzu_self,
                     narrative_memory=self._narrative_memory_text(agent.entity_id),
+                    knowledge_gaps=(self._outline or {}).get("knowledge_gaps", []),
                 )
             if dec:
                 dec["actor_id"] = agent.entity_id

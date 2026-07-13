@@ -98,6 +98,7 @@ class StrategicReasoner:
         user_cmd: str = "",
         self_memory: str = "",
         narrative_memory: str = "",
+        knowledge_gaps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """统一决策入口：角色基于人格、记忆、弧光自然推理行动。
 
@@ -174,6 +175,21 @@ class StrategicReasoner:
             header += f"\n## 原著背景参考\n{static_knowledge}\n"
         if env_context:
             header += f"\n## 环境\n{env_context}\n"
+
+        # 信息差：角色当前相信但可能是错的（戏剧反讽）
+        if knowledge_gaps:
+            for gap in knowledge_gaps:
+                if (isinstance(gap, dict) and
+                    gap.get("character") == agent.name and
+                    round_number < int(gap.get("before_round", 999))):
+                    believes = gap.get("believes", "")
+                    if believes:
+                        header += (
+                            f"\n## 你目前的认知\n"
+                            f"你相信：{believes}。\n"
+                            f"但细节之间似乎有些许裂缝——你隐约感到事情可能不是表面那样。\n"
+                        )
+                    break  # 只注入一条信息差
 
         if mode == "blueline":
             header += (
