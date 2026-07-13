@@ -1052,6 +1052,11 @@ class DeductionOrchestrator:
             full_parts.append(prose)
         else:
             story_state: dict[str, Any] = {}  # 累积剧情状态
+            if outline and outline.get("themes"):
+                story_state["themes"] = outline["themes"]
+                story_state["theme_appearances"] = {}
+            if outline and outline.get("subplots"):
+                story_state["subplots"] = outline["subplots"]
             canon = CanonLedger.from_state(story_state, blueprint=outline)
             alive_checker = (lambda st: self._rule_engine.is_alive(st)) if self._rule_engine else None
             from .climax_driver import ClimaxDriver
@@ -1085,6 +1090,40 @@ class DeductionOrchestrator:
                 if not is_fallback:
                     full_parts.append(f"第{i}章\n\n{text}")
                     prev_tail = text[-600:]
+
+                    # 文学质检：钩子/节奏/重量
+                    from .prose_renderer import (
+                        _check_chapter_hook, _analyze_rhythm, _compute_chapter_weight)
+                    hook = _check_chapter_hook(text)
+                    if hook:
+                        story_state["next_chapter_hint"] = hook
+                    rhythm = _analyze_rhythm(text)
+                    ra = story_state.setdefault("rhythm_history", [])
+                    ra.append(rhythm)
+                    if len(ra) >= 2:
+                        if (ra[-1]["action_ratio"] > 0.3 and ra[-2]["action_ratio"] > 0.3):
+                            story_state["rhythm_hint"] = "前两章节奏偏重动作。本章请减速——给角色一个停下来思考的场景。"
+                        elif (ra[-1]["reflect_ratio"] > 0.4 and ra[-2]["reflect_ratio"] > 0.4):
+                            story_state["rhythm_hint"] = "前两章节奏偏重内心反思。本章请加速——引入一个外部事件打破沉思。"
+                    weight = _compute_chapter_weight(text)
+                    cw = story_state.setdefault("chapter_weights", [])
+                    cw.append(weight)
+                    if len(cw) >= 3 and max(1e-6, cw[-2]) > 2 * max(1e-6, cw[-1]):
+                        story_state["weight_hint"] = "前一章的情节重量显著低于前两章。本章请加大情节密度——一个重要的揭示、一个不可逆的选择、或一次关键的对峙。"
+
+                    # 主题出现追踪
+                    themes = story_state.get("themes") or []
+                    if themes:
+                        ta = story_state.setdefault("theme_appearances", {})
+                        for t in themes:
+                            name = t.get("name", "")
+                            desc = t.get("description", "")
+                            # 简单词袋匹配：如果章节文本包含主题名或其描述中的关键词
+                            kw = name[:4] if len(name) >= 4 else name
+                            dw = desc[:6] if len(desc) >= 6 else desc
+                            cnt = text.count(kw) + text.count(dw)
+                            ta[f"{i}_{name}"] = cnt
+
                     self._record_chapter(i=i, text=text, story_state=story_state,
                                          canon=canon, states=ci["states"], alive_checker=alive_checker)
                 else:
