@@ -111,6 +111,11 @@ class StrategicReasoner:
             header = (
                 f"你是「{agent.name}」，这是一个文学创作中的关键场景。\n\n"
                 f"## 你的人格\n{agent.persona or '（无）'}\n\n"
+            )
+            extra = getattr(agent, "system_prompt_extra", "")
+            if extra:
+                header += f"## 你的行为准则（从经历中习得）\n{extra}\n\n"
+            header += (
                 f"## 你的目标\n{goals_txt}\n\n"
                 f"## 你当前的状态\n{narrative_state}\n"
             )
@@ -119,6 +124,11 @@ class StrategicReasoner:
             header = (
                 f"你是「{agent.name}」。\n\n"
                 f"## 你的人格\n{agent.persona or '（无）'}\n\n"
+            )
+            extra = getattr(agent, "system_prompt_extra", "")
+            if extra:
+                header += f"## 你的行为准则（从经历中习得）\n{extra}\n\n"
+            header += (
                 f"## 你的目标\n{goals_txt}\n"
                 f"（不可动摇的初衷：{imm}）\n\n"
                 f"## 你当前的状态\n{narrative_state}\n"

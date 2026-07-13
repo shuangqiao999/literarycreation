@@ -95,6 +95,13 @@ class SimulationEngine:
             "manipulate": {"faction_polarity": 6, "rumor_intensity": 8},
             "observe": {},
         }
+        # 人格反思计数器：per-agent 事件累积数 + 上次反思轮次
+        self._reflect_counters: dict[str, int] = {}
+        self._last_reflect_round: dict[str, int] = {}
+        # 上次反思时的指标快照（用于检测剧变）
+        self._last_reflect_snapshot: dict[str, dict[str, float]] = {}
+        # 内存事件历史（供反思时查询）
+        self._event_history: list[dict[str, Any]] = []
 
         from .narrative_memory import NarrativeMemoryStore
         self.narrative_memory = NarrativeMemoryStore(cap=8)
@@ -403,6 +410,14 @@ class SimulationEngine:
                 self.graph.add_event(event_id, action.content[:200], action.action_type,
                                      action.timestamp, action.agent_id, effect=effect_txt)
                 self.graph.add_acted(action.agent_id, event_id, action.action_type, action.timestamp)
+                # 写入内存事件历史（供反思时快速检索）
+                self._event_history.append({
+                    "round": round_number, "agent": action.agent_id,
+                    "content": action.content, "action": action.action_type,
+                    "effect": effect_txt,
+                })
+                if len(self._event_history) > 200:
+                    self._event_history = self._event_history[-100:]
                 if self._preprocessor is not None:
                     try:
                         self._preprocessor.add_event_memory(
@@ -423,6 +438,10 @@ class SimulationEngine:
             summary = scene_text if scene_text else f"第{round_number}轮：{action.action_type}"
             self.narrative_memory.add(action.agent_id, summary)
 
+        # 角色人格反思（事件驱动：经历累积/关系剧变/状态突变时触发）
+        for agent in self.agents:
+            await self._reflect_character(agent, round_number, client, deltas)
+
         # 写入 narrator 文本供 prose renderer
         narration = ""
         if self._enable_narrate and hasattr(self, '_chat_fn'):
@@ -435,6 +454,104 @@ class SimulationEngine:
         sim_round.state_delta = {"narration": narration, "states": snapshots, "snapshot": self._build_state_snapshot(round_number)}
 
         return sim_round
+
+    # ── 角色人格动态反思 ──
+
+    async def _reflect_character(self, agent: DeductionAgentProfile,
+                                  round_number: int, client: Any,
+                                  deltas: dict[str, dict[str, float]]) -> None:
+        """事件驱动人格反思：角色从经历中成长，人格不再是静态设定。"""
+        # 触发条件：事件累积 > 8 或 重大指标变化 > 25 点累计 或 空闲 > 6 轮
+        eid = agent.entity_id
+        self._reflect_counters[eid] = self._reflect_counters.get(eid, 0) + 1
+        last_r = self._last_reflect_round.get(eid, 0)
+
+        should_reflect = False
+        reason = ""
+        if self._reflect_counters[eid] >= 8:
+            should_reflect = True
+            reason = "经历积累"
+        if not should_reflect and (round_number - last_r) > 6:
+            should_reflect = True
+            reason = "长期缺乏反思"
+        if not should_reflect:
+            # 检测指标剧变
+            cur = self._states.get(eid)
+            if cur is not None:
+                prev = self._last_reflect_snapshot.get(eid, {})
+                total_change = 0.0
+                for mk, mv in cur.metrics.items():
+                    total_change += abs(mv - prev.get(mk, mv))
+                if total_change > 25.0:
+                    should_reflect = True
+                    reason = f"指标剧变 (+{total_change:.0f})"
+        if not should_reflect:
+            return
+
+        from literarycreation.core.llm_client import Message
+        from ._utils import extract_text as _extract
+
+        # 取角色的近期事件
+        my_events = [e for e in self._event_history[-20:]
+                     if e.get("agent") == eid or e.get("agent_name") == agent.name] if hasattr(self, "_event_history") else []
+        if self.graph is not None:
+            try:
+                my_events = self.graph.get_recent_events_for_agent(eid, last_n=8)
+            except Exception:
+                pass
+        events_text = "\n".join(
+            f"- [R{e.get('round','?')}] {e.get('description', e.get('content',''))[:80]}"
+            for e in my_events[-8:]
+        ) or "（无近期事件）"
+
+        prompt = (
+            f"你是「{agent.name}」的潜意识。回顾你的经历，判断你的性格是否需要微调。\n\n"
+            f"## 你的核心人格（不可动摇）\n{agent.persona or '（无）'}\n\n"
+            f"## 你已有的行为准则\n{agent.system_prompt_extra or '（无，完全依据核心人格）'}\n\n"
+            f"## 近期经历\n{events_text}\n\n"
+            f"## 触发原因\n{reason}\n\n"
+            f"## 任务\n"
+            f"根据经历，判断是否需要在核心人格之上添加一条新的行为准则（或修正旧准则）。\n"
+            f"核心人格不可动摇，新准则只能是对核心人格的策略性微调——角色经历了什么，"
+            f"所以变得怎样。\n"
+            f"- 输出格式：一行简短中文准则（20字以内），直接陈述。\n"
+            f"- 如果当前人格已足够应对，输出\"无需调整\"。\n"
+            f"- 准则上限3条，超限时替换最旧的一条。\n"
+            f"- 示例：\"遭受背叛后更谨慎选择盟友\" \"危急时刻敢于孤注一掷\"\n"
+            f"\n只输出准则本身或\"无需调整\"，不要解释。"
+        )
+        try:
+            resp = await client.chat(
+                [Message(role="user", content=prompt)],
+                system="你是潜意识分析师，输出简短行为准则或'无需调整'。",
+                temperature=0.3,
+                max_tokens=60,
+            )
+            text = _extract(resp).strip()
+            if not text or "无需调整" in text or len(text) < 2:
+                return
+            old_extra = agent.system_prompt_extra
+            if old_extra and text not in old_extra:
+                parts = [p.strip() for p in old_extra.split("；") if p.strip()]
+                if len(parts) >= 3:
+                    parts = parts[1:]
+                parts.append(text)
+                agent.system_prompt_extra = "；".join(parts)
+            elif not old_extra:
+                agent.system_prompt_extra = text
+            else:
+                return
+            self._log("simulation",
+                       f"[人格演化] {agent.name} 新增准则: {text} (R{round_number}, {reason})")
+        except Exception as e:
+            logger.debug("[Simulator] 角色反思失败: %s", e)
+
+        # 重置计数器 + 保存快照
+        self._reflect_counters[eid] = 0
+        self._last_reflect_round[eid] = round_number
+        cur = self._states.get(eid)
+        if cur is not None:
+            self._last_reflect_snapshot[eid] = dict(cur.metrics)
 
     # ── Helpers ──
 
