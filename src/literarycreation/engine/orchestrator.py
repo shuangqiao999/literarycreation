@@ -28,6 +28,24 @@ class _PhaseCancelledError(Exception):
     """用户取消推演（非错误，应持久化进度为 paused）。"""
 
 
+def _build_atmosphere_text(thermometer: dict[str, float]) -> str:
+    """将社会温度计读数编译为叙事氛围指导文本，注入散文渲染 prompt。"""
+    if not thermometer:
+        return ""
+    parts: list[str] = []
+    if thermometer.get("faction_polarity", 40) > 60:
+        parts.append("社会氛围是分裂与猜疑。每个人都在选边站，每条走廊里都有窃窃私语。对话应有潜台词，每个微笑背后都藏着一笔计算。")
+    if thermometer.get("rumor_intensity", 30) > 50:
+        parts.append("流言已成为不可忽视的力量。角色的一举一动都被放大、扭曲、传播。即使是私下对话，也要带上'可能被人听到'的紧张感。")
+    if thermometer.get("intimate_pressure", 20) > 40:
+        parts.append("私人情感已变成公开的赌注。每一次表白、每一次拒绝，都不再只是两个人的事——它们在改变权力天平。")
+    if thermometer.get("external_threat", 10) > 30:
+        parts.append("外部威胁正在迫近。所有人的行动都应带上紧迫感——对话要简短，动作要迅速，没有时间犹豫。")
+    if not parts:
+        return ""
+    return "【本章氛围指导 — 根据当前故事世界的社会状态，本章应体现以下氛围】\n" + "\n".join(parts)
+
+
 class DeductionOrchestrator:
 
     def __init__(
@@ -517,6 +535,7 @@ class DeductionOrchestrator:
             event_scheduler=event_scheduler,
             max_concurrent=self._max_concurrent,
         )
+        self._simulation_engine = engine  # 供散文渲染阶段读取社会温度
 
         rounds: list[SimulationRound] = []
         start_rnd = self._resume_start_round + 1
@@ -689,6 +708,22 @@ class DeductionOrchestrator:
         anti_repeat = build_anti_repeat_context(story_state)
         if anti_repeat:
             story_ctx = anti_repeat + "\n\n" + story_ctx
+        # 社会氛围（从模拟引擎温度计编译为叙事氛围文本）
+        sim = getattr(self, "_simulation_engine", None)
+        if sim is not None:
+            atmosphere = _build_atmosphere_text(getattr(sim, "_social_thermometer", {}))
+            if atmosphere:
+                story_ctx = atmosphere + "\n\n" + story_ctx
+        # 角色行为准则（从反思机制产出，应在散文的行文中自然体现）
+        reflect_lines = []
+        for a in (self._agents or []):
+            extra = getattr(a, "system_prompt_extra", "")
+            if extra:
+                reflect_lines.append(f"- {a.name}：{extra}")
+        if reflect_lines:
+            story_ctx = ("【角色当前行为准则 — 这些是角色在经历中习得的经验，"
+                         "应在本章的行动和对话中自然体现，而非直接说教】\n"
+                         + "\n".join(reflect_lines) + "\n\n" + story_ctx)
         # 角色人格
         persona_lines = []
         for a in (self._agents or []):

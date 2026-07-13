@@ -100,6 +100,8 @@ class SimulationEngine:
         self._last_reflect_round: dict[str, int] = {}
         # 上次反思时的指标快照（用于检测剧变）
         self._last_reflect_snapshot: dict[str, dict[str, float]] = {}
+        # 上次反思时的关系快照（用于检测关系质变）
+        self._last_reflect_relations: dict[str, dict[str, str]] = {}
         # 内存事件历史（供反思时查询）
         self._event_history: list[dict[str, Any]] = []
 
@@ -417,7 +419,7 @@ class SimulationEngine:
                     "effect": effect_txt,
                 })
                 if len(self._event_history) > 200:
-                    self._event_history = self._event_history[-100:]
+                    self._event_history = self._event_history[-150:]
                 if self._preprocessor is not None:
                     try:
                         self._preprocessor.add_event_memory(
@@ -485,6 +487,32 @@ class SimulationEngine:
                 if total_change > 25.0:
                     should_reflect = True
                     reason = f"指标剧变 (+{total_change:.0f})"
+        if not should_reflect and self.graph is not None:
+            # 检测关系质变：新敌人出现 或 盟友流失
+            try:
+                nb = self.graph.get_entity_neighbors(eid)
+                cur_rels: dict[str, str] = {}
+                for n in nb.get("neighbors", []):
+                    r = n.get("relation", "") or ""
+                    nm = n.get("name", "") or ""
+                    if r and nm:
+                        cur_rels[r] = nm
+                prev_rels = self._last_reflect_relations.get(eid, {})
+                # 新敌对关系
+                cur_foes = {v for k, v in cur_rels.items() if any(w in k for w in ("敌","对立","背叛","仇","威胁"))}
+                prv_foes = {v for k, v in prev_rels.items() if any(w in k for w in ("敌","对立","背叛","仇","威胁"))}
+                if cur_foes - prv_foes:
+                    should_reflect = True
+                    reason = "新敌人出现"
+                # 盟友流失
+                if not should_reflect:
+                    cur_ally = {v for k, v in cur_rels.items() if any(w in k for w in ("盟","友","支持","效忠","追随"))}
+                    prv_ally = {v for k, v in prev_rels.items() if any(w in k for w in ("盟","友","支持","效忠","追随"))}
+                    if prv_ally - cur_ally:
+                        should_reflect = True
+                        reason = "盟友流失"
+            except Exception:
+                pass
         if not should_reflect:
             return
 
@@ -518,6 +546,9 @@ class SimulationEngine:
             f"- 如果当前人格已足够应对，输出\"无需调整\"。\n"
             f"- 准则上限3条，超限时替换最旧的一条。\n"
             f"- 示例：\"遭受背叛后更谨慎选择盟友\" \"危急时刻敢于孤注一掷\"\n"
+            f"- 如果你的说话方式也因经历而发生了变化（如：变得更简短、更尖锐、不再用敬语），另起一行输出：\n"
+            f"  语风：简短描述（如\"每句话都像命令，不再用敬语\"）\n"
+            f"  没有变化则省略此行。\n"
             f"\n只输出准则本身或\"无需调整\"，不要解释。"
         )
         try:
@@ -528,7 +559,30 @@ class SimulationEngine:
                 max_tokens=60,
             )
             text = _extract(resp).strip()
+            # 提取语言风格微调（"语风：..."）
+            style_update = ""
+            if "语风：" in text and "\n" not in text.split("语风：", 1)[-1][:20]:
+                parts = text.split("语风：", 1)
+                text = parts[0].strip()
+                style_update = parts[1].strip()[:30]
+            # 即使无调整也保存快照，防止下次基于旧快照高估变化量
             if not text or "无需调整" in text or len(text) < 2:
+                if style_update and hasattr(agent, "speech_style"):
+                    agent.speech_style = style_update
+                self._reflect_counters[eid] = 0
+                self._last_reflect_round[eid] = round_number
+                cur = self._states.get(eid)
+                if cur is not None:
+                    self._last_reflect_snapshot[eid] = dict(cur.metrics)
+                if self.graph is not None:
+                    try:
+                        nb = self.graph.get_entity_neighbors(eid)
+                        self._last_reflect_relations[eid] = {
+                            n.get("relation","") or "": n.get("name","") or ""
+                            for n in nb.get("neighbors",[]) if n.get("relation") and n.get("name")
+                        }
+                    except Exception:
+                        pass
                 return
             old_extra = agent.system_prompt_extra
             if old_extra and text not in old_extra:
@@ -541,6 +595,8 @@ class SimulationEngine:
                 agent.system_prompt_extra = text
             else:
                 return
+            if style_update and hasattr(agent, "speech_style"):
+                agent.speech_style = style_update
             self._log("simulation",
                        f"[人格演化] {agent.name} 新增准则: {text} (R{round_number}, {reason})")
         except Exception as e:
@@ -552,6 +608,16 @@ class SimulationEngine:
         cur = self._states.get(eid)
         if cur is not None:
             self._last_reflect_snapshot[eid] = dict(cur.metrics)
+        # 保存当前关系快照（用于下次检测关系质变）
+        if self.graph is not None:
+            try:
+                nb = self.graph.get_entity_neighbors(eid)
+                self._last_reflect_relations[eid] = {
+                    n.get("relation", "") or "": n.get("name", "") or ""
+                    for n in nb.get("neighbors", []) if n.get("relation") and n.get("name")
+                }
+            except Exception:
+                pass
 
     # ── Helpers ──
 
