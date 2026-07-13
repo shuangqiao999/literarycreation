@@ -13,10 +13,17 @@ logger = logging.getLogger(__name__)
 
 
 def _metrics_to_narrative(state: Any) -> str:
-    """将数值指标转换为叙事语言，每个区间3个文学性变体随机选择。"""
+    """将数值指标转换为叙事语言，优先合成复合情感，未命中回退单指标变体。"""
     import random as _rnd
     m = state.metrics if hasattr(state, "metrics") else {}
     lines = [f"{state.name if hasattr(state, 'name') else '角色'}当前的内心状态："]
+
+    # 优先尝试复合情感合成
+    from .emotional_engine import EmotionalComposer
+    compound = EmotionalComposer().compose(m)
+    if compound:
+        lines.append(f"- 【深层的矛盾】{compound}")
+        return "\n".join(lines)
 
     trust = m.get("trust", 50)
     if trust < 20:

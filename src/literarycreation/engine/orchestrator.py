@@ -714,12 +714,36 @@ class DeductionOrchestrator:
         anti_repeat = build_anti_repeat_context(story_state)
         if anti_repeat:
             story_ctx = anti_repeat + "\n\n" + story_ctx
+        # 上一章的读者反馈 → 本章的行为修正
+        prev_feedbacks = story_state.get("reader_feedback") or []
+        if prev_feedbacks:
+            from .reader_model import build_reader_feedback_block
+            reader_ctx = build_reader_feedback_block(prev_feedbacks[-1])
+            if reader_ctx:
+                story_ctx = reader_ctx + "\n\n" + story_ctx
         # 社会氛围（从模拟引擎温度计编译为叙事氛围文本）
         sim = getattr(self, "_simulation_engine", None)
         if sim is not None:
             atmosphere = _build_atmosphere_text(getattr(sim, "_social_thermometer", {}))
             if atmosphere:
                 story_ctx = atmosphere + "\n\n" + story_ctx
+        # 叙述者声音（全书一致，内部已生成）
+        if hasattr(self, "_narrator") and self._narrator:
+            voice_block = self._narrator.build_voice_block()
+            if voice_block:
+                story_ctx = voice_block + "\n\n" + story_ctx
+        # 场景权重分配
+        if hasattr(self, "_scene_allocator") and self._scene_allocator:
+            per_ch = getattr(self, "_per_ch", 0)
+            scene_alloc = self._scene_allocator.allocate(
+                events, outline, chapter_ctx, per_ch)
+            if scene_alloc:
+                story_ctx = scene_alloc + "\n\n" + story_ctx
+        # 母题回声
+        if hasattr(self, "_motif_tracker") and self._motif_tracker:
+            motif_hint = self._motif_tracker.inject_prompt(i)
+            if motif_hint:
+                story_ctx = motif_hint + "\n\n" + story_ctx
         # 角色行为准则（从反思机制产出，应在散文的行文中自然体现）
         reflect_lines = []
         for a in (self._agents or []):
@@ -1029,9 +1053,35 @@ class DeductionOrchestrator:
         n = max(1, len(rounds))
         per_ch = (target_words // n) if target_words > 0 else 0
 
+        # 初始化叙述者声音代理
+        from .narrator_broker import NarratorRegistry
+        self._narrator = NarratorRegistry(style=style)
+        try:
+            await self._narrator.generate(DeductionLLMClient(), self.session.source_material)
+        except Exception:
+            pass
+
+        # 初始化技艺守卫
+        from .craft_guard import SceneAllocator, MotifTracker
+        self._scene_allocator = SceneAllocator()
+        self._motif_tracker = MotifTracker()
+        self._per_ch = per_ch
+
+        # 情感投资数据（从模拟器传出，存 story_state 供高潮驱动用）
+        sim = getattr(self, "_simulation_engine", None)
+        if sim and hasattr(sim, "_emotional_investment"):
+            inv_data = sim._emotional_investment.to_dict()
+
         chapters_meta: list[dict[str, Any]] = []
         full_parts: list[str] = []
         prev_tail = ""
+        # 读者反馈循环
+        reader_feedback_list: list[dict] = []
+        # 多POV模式检测
+        pov_chars = None
+        if outline and outline.get("pov", {}).get("mode") == "multi":
+            pov_chars = [c.get("name", "") for c in outline.get("characters", [])
+                         if c.get("name")][:3] or None
 
         def _write(fname: str, text: str) -> str:
             try:
@@ -1124,11 +1174,37 @@ class DeductionOrchestrator:
                             cnt = text.count(kw) + text.count(dw)
                             ta[f"{i}_{name}"] = cnt
 
+                    # 母题观察
+                    self._motif_tracker.observe_chapter(text, i)
+
+                    # 读者体验模拟
+                    from .reader_model import simulate_reader, build_reader_feedback_block
+                    reader_fb = await simulate_reader(DeductionLLMClient(), text, i)
+                    if reader_fb:
+                        reader_feedback_list.append(reader_fb)
+                        story_state["reader_feedback"] = reader_feedback_list
+
                     self._record_chapter(i=i, text=text, story_state=story_state,
                                          canon=canon, states=ci["states"], alive_checker=alive_checker)
                 else:
                     full_parts.append(f"第{i}章\n\n（正文生成失败，详细摘要见文件 {fname}）")
                 self._log("report", f"第{i}/{n}章已生成并保存（{len(text)} 字）→ {fname}")
+
+        # 修订流水线：对读者反馈不佳的章节做编辑增强
+        from .revision_pipeline import RevisionPipeline
+        rev_pipe = RevisionPipeline(self._narrator.build_voice_block())
+        for idx, ch_text in enumerate(full_parts, 1):
+            rfb = reader_feedback_list[idx - 1] if idx <= len(reader_feedback_list) else None
+            cw_data = story_state.get("chapter_weights", [])
+            cw = cw_data[idx - 1] if idx <= len(cw_data) else 0.0
+            try:
+                revised, changes = await rev_pipe.revise(
+                    DeductionLLMClient(), idx, ch_text, rfb, cw)
+                if changes:
+                    full_parts[idx - 1] = revised
+                    self._log("report", f"第{idx}章经编辑修订（{';'.join(changes[:3])}）")
+            except Exception:
+                pass
 
         prose = "\n\n".join(full_parts)
         # 合本

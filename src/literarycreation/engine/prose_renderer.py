@@ -796,6 +796,48 @@ class ProseRenderer:
             lines = [f"【第{chapter_idx}章 · 正文生成失败，以下为本章摘要】", "", "角色状态：", states_txt, "", "情节：", events_txt]
             return "\n".join(lines)
 
+    async def render_multi_pov(
+        self, *, chapter_idx, total_chapters, seed_text, round_events,
+        round_narration, round_states, prev_tail, target_words=0,
+        chapter_context=None, story_context="", style_anchors="",
+        outline_event="", pov_characters=None,
+    ) -> str:
+        """多 POV 交叉剪辑：分视角独立渲染后交织。"""
+        if not pov_characters or len(pov_characters) < 2:
+            return await self.render_chapter(
+                chapter_idx=chapter_idx, total_chapters=total_chapters,
+                seed_text=seed_text, round_events=round_events,
+                round_narration=round_narration, round_states=round_states,
+                prev_tail=prev_tail, target_words=target_words,
+                chapter_context=chapter_context, story_context=story_context,
+                style_anchors=style_anchors, outline_event=outline_event,
+            )
+        npov = len(pov_characters)
+        seg_words = max(500, target_words // npov) if target_words else 0
+        segments: list[str] = []
+        seg_tail = prev_tail
+        for idx, pov_name in enumerate(pov_characters):
+            pov_events = [e for e in (round_events or [])
+                          if pov_name in e or idx == len(pov_characters) - 1]
+            if not pov_events:
+                pov_events = round_events
+            pov_states = {k: v for k, v in (round_states or {}).items()
+                          if v.get("name") == pov_name} or round_states
+            seg = await self.render_chapter(
+                chapter_idx=chapter_idx, total_chapters=total_chapters,
+                seed_text=seed_text, round_events=pov_events,
+                round_narration=round_narration, round_states=pov_states,
+                prev_tail=seg_tail, target_words=seg_words,
+                chapter_context=chapter_context, story_context=story_context,
+                style_anchors=style_anchors, outline_event=outline_event,
+            )
+            if seg and "正文生成失败" not in seg[:20]:
+                segments.append(f"\n\n—— {pov_name}视角 ——\n\n{seg.strip()}")
+                seg_tail = seg[-300:]
+        if not segments:
+            return ""
+        return "\n".join(segments)
+
     async def render(
         self,
         seed_text: str,

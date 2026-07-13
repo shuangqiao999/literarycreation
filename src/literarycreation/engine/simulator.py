@@ -446,6 +446,17 @@ class SimulationEngine:
         for agent in self.agents:
             await self._reflect_character(agent, round_number, client, deltas)
 
+        # 情感投入追踪（供高潮回报校验）
+        if not hasattr(self, "_emotional_investment"):
+            from .emotional_engine import EmotionalInvestment
+            self._emotional_investment = EmotionalInvestment()
+        for dec in decisions:
+            self._emotional_investment.record(
+                dec.get("actor_id", ""),
+                dec.get("action_type", "observe"),
+                float(dec.get("intensity", 0.5)),
+            )
+
         # 写入 narrator 文本供 prose renderer
         narration = ""
         if self._enable_narrate and hasattr(self, '_chat_fn'):

@@ -38,6 +38,20 @@ class ClimaxDriver:
             if not dead:
                 guidance.append("已临近结局却无任何重大代价或牺牲，本章应升级冲突、让抉择产生不可逆后果")
 
+        # 4) 情感投资回报校验
+        inv_data = story_state.get("emotional_investment")
+        if inv_data and chapter_idx >= int(self.total_chapters * 0.8):
+            from .emotional_engine import EmotionalInvestment
+            inv = EmotionalInvestment.from_dict(inv_data)
+            # 用梗概方式检查：如果角色有大量未偿还投资
+            ledger = inv._ledger
+            heavy_chars = [c for c, pts in ledger.items() if pts > 15]
+            if heavy_chars:
+                guidance.append(
+                    f"角色 {','.join(c[:6] for c in heavy_chars[:3])} "
+                    f"已累计大量情感铺垫，本章请优先安排他们收束情感弧光——"
+                    f"不能只是提及，要用一个'场景'来偿还读者 20 章的等待。")
+
         if not guidance:
             return []
         return ["【高潮推进】" + g for g in guidance]
