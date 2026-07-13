@@ -1,6 +1,7 @@
 """Deduction Orchestrator — five-stage pipeline coordinator with pause/resume."""
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import logging
 from collections.abc import Callable
@@ -81,6 +82,7 @@ class DeductionOrchestrator:
         self._canon_retries: int = 2
         self._scene_retries: int = 2
         self._quality_warnings: list[str] = []  # 章节级质量警告，供API报告和重跑反馈
+        self._states_lock = asyncio.Lock()  # 守卫 _states 的跨协程读写
         self._auto_blueprint: bool = True
         self._last_canon_conflicts: list[str] = []
         self._style_mode: str = "manual"
@@ -156,6 +158,10 @@ class DeductionOrchestrator:
                 }
                 for eid, st in states.items()
             }
+        # 追加情感投资数据
+        sim = getattr(self, "_simulation_engine", None)
+        if sim and hasattr(sim, "_emotional_investment"):
+            snapshot["emotional_investment"] = sim._emotional_investment.to_dict()
         data = self.store.get(session_id)
         cfg = (data or {}).get("config_json", {}) or {}
         if isinstance(cfg, str):
@@ -269,7 +275,12 @@ class DeductionOrchestrator:
                 restored[eid] = st
             self._states = restored
             self._log("orchestrator",
-                      f"恢复量化状态: {len(restored)} 个实体")
+                       f"恢复量化状态: {len(restored)} 个实体")
+
+        # 恢复情感投资数据
+        self._saved_investment_data = (snapshot or {}).get("emotional_investment")
+        if self._saved_investment_data:
+            self._log("orchestrator", "恢复情感投资追踪数据")
 
         self.store.update(self.session.id,
                           status=SessionStatus.SIMULATING.value,
@@ -535,6 +546,7 @@ class DeductionOrchestrator:
             mode=mode,
             event_scheduler=event_scheduler,
             max_concurrent=self._max_concurrent,
+            investment_data=getattr(self, "_saved_investment_data", None),
         )
         self._simulation_engine = engine  # 供散文渲染阶段读取社会温度
 
@@ -1058,13 +1070,18 @@ class DeductionOrchestrator:
         n = max(1, len(rounds))
         per_ch = (target_words // n) if target_words > 0 else 0
 
-        # 初始化叙述者声音代理
+        # 初始化叙述者声音代理（检测风格切换时重新生成）
         from .narrator_broker import NarratorRegistry
-        self._narrator = NarratorRegistry(style=style)
-        try:
-            await self._narrator.generate(DeductionLLMClient(), self.session.source_material)
-        except Exception:
-            pass
+        current_style = getattr(self, "_selected_style", style) or style
+        if (not hasattr(self, "_narrator_style") or
+                self._narrator_style != current_style or
+                not hasattr(self, "_narrator")):
+            self._narrator_style = current_style
+            self._narrator = NarratorRegistry(style=current_style)
+            try:
+                await self._narrator.generate(DeductionLLMClient(), self.session.source_material)
+            except Exception:
+                pass
 
         # 初始化技艺守卫
         from .craft_guard import SceneAllocator, MotifTracker

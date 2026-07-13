@@ -51,6 +51,7 @@ class SimulationEngine:
         mode: Literal["freeform", "blueline"] = "freeform",
         event_scheduler: EventScheduler | None = None,
         max_concurrent: int = 2,
+        investment_data: dict | None = None,
     ) -> None:
         self.agents = agents
         self.graph = graph
@@ -104,6 +105,12 @@ class SimulationEngine:
         self._last_reflect_relations: dict[str, dict[str, str]] = {}
         # 内存事件历史（供反思时查询）
         self._event_history: list[dict[str, Any]] = []
+        # 情感投资追踪（恢复时从持久化数据重建）
+        from .emotional_engine import EmotionalInvestment
+        self._emotional_investment = (
+            EmotionalInvestment.from_dict(investment_data) if investment_data
+            else EmotionalInvestment()
+        )
 
         from .narrative_memory import NarrativeMemoryStore
         self.narrative_memory = NarrativeMemoryStore(cap=8)
@@ -442,14 +449,21 @@ class SimulationEngine:
             summary = scene_text if scene_text else f"第{round_number}轮：{action.action_type}"
             self.narrative_memory.add(action.agent_id, summary)
 
-        # 角色人格反思（事件驱动：经历累积/关系剧变/状态突变时触发）
+        # 角色人格反思（先收集所有需要的角色，再批量调用）
+        pending = []
         for agent in self.agents:
-            await self._reflect_character(agent, round_number, client, deltas)
+            ok, reason = self._reflect_needed(agent, round_number)
+            if ok:
+                pending.append(agent)
+        if pending:
+            await self._reflect_batch(pending, round_number, client, deltas)
+        elif self.agents:
+            # 即使无角色需要反思，也重置所有角色的计数器（_reflect_needed 已递增）
+            for agent in self.agents:
+                eid = agent.entity_id
+                self._last_reflect_round[eid] = round_number
 
         # 情感投入追踪（供高潮回报校验）
-        if not hasattr(self, "_emotional_investment"):
-            from .emotional_engine import EmotionalInvestment
-            self._emotional_investment = EmotionalInvestment()
         for dec in decisions:
             self._emotional_investment.record(
                 dec.get("actor_id", ""),
@@ -472,165 +486,125 @@ class SimulationEngine:
 
     # ── 角色人格动态反思 ──
 
-    async def _reflect_character(self, agent: DeductionAgentProfile,
-                                  round_number: int, client: Any,
-                                  deltas: dict[str, dict[str, float]]) -> None:
-        """事件驱动人格反思：角色从经历中成长，人格不再是静态设定。"""
-        # 触发条件：事件累积 > 8 或 重大指标变化 > 25 点累计 或 空闲 > 6 轮
+    def _reflect_needed(self, agent: DeductionAgentProfile,
+                         round_number: int) -> tuple[bool, str]:
+        """返回 (是否触发, 触发原因)。不调用 LLM，纯规则判断。"""
         eid = agent.entity_id
         self._reflect_counters[eid] = self._reflect_counters.get(eid, 0) + 1
         last_r = self._last_reflect_round.get(eid, 0)
-
-        should_reflect = False
-        reason = ""
         if self._reflect_counters[eid] >= 8:
-            should_reflect = True
-            reason = "经历积累"
-        if not should_reflect and (round_number - last_r) > 6:
-            should_reflect = True
-            reason = "长期缺乏反思"
-        if not should_reflect:
-            # 检测指标剧变
-            cur = self._states.get(eid)
-            if cur is not None:
-                prev = self._last_reflect_snapshot.get(eid, {})
-                total_change = 0.0
-                for mk, mv in cur.metrics.items():
-                    total_change += abs(mv - prev.get(mk, mv))
-                if total_change > 25.0:
-                    should_reflect = True
-                    reason = f"指标剧变 (+{total_change:.0f})"
-        if not should_reflect and self.graph is not None:
-            # 检测关系质变：新敌人出现 或 盟友流失
+            return True, "经历积累"
+        if (round_number - last_r) > 6:
+            return True, "长期缺乏反思"
+        cur = self._states.get(eid)
+        if cur is not None:
+            prev = self._last_reflect_snapshot.get(eid, {})
+            total_change = sum(abs(cur.metrics.get(mk, 0) - prev.get(mk, 0))
+                               for mk in cur.metrics)
+            if total_change > 25.0:
+                return True, f"指标剧变 (+{total_change:.0f})"
+        if self.graph is not None:
             try:
                 nb = self.graph.get_entity_neighbors(eid)
-                cur_rels: dict[str, str] = {}
-                for n in nb.get("neighbors", []):
-                    r = n.get("relation", "") or ""
-                    nm = n.get("name", "") or ""
-                    if r and nm:
-                        cur_rels[r] = nm
+                cur_rels = {n.get("relation","") or "": n.get("name","") or ""
+                            for n in nb.get("neighbors",[]) if n.get("relation") and n.get("name")}
                 prev_rels = self._last_reflect_relations.get(eid, {})
-                # 新敌对关系
-                cur_foes = {v for k, v in cur_rels.items() if any(w in k for w in ("敌","对立","背叛","仇","威胁"))}
-                prv_foes = {v for k, v in prev_rels.items() if any(w in k for w in ("敌","对立","背叛","仇","威胁"))}
+                cur_foes = {v for k,v in cur_rels.items() if any(w in k for w in ("敌","对立","背叛","仇","威胁"))}
+                prv_foes = {v for k,v in prev_rels.items() if any(w in k for w in ("敌","对立","背叛","仇","威胁"))}
                 if cur_foes - prv_foes:
-                    should_reflect = True
-                    reason = "新敌人出现"
-                # 盟友流失
-                if not should_reflect:
-                    cur_ally = {v for k, v in cur_rels.items() if any(w in k for w in ("盟","友","支持","效忠","追随"))}
-                    prv_ally = {v for k, v in prev_rels.items() if any(w in k for w in ("盟","友","支持","效忠","追随"))}
-                    if prv_ally - cur_ally:
-                        should_reflect = True
-                        reason = "盟友流失"
+                    return True, "新敌人出现"
+                cur_ally = {v for k,v in cur_rels.items() if any(w in k for w in ("盟","友","支持","效忠","追随"))}
+                prv_ally = {v for k,v in prev_rels.items() if any(w in k for w in ("盟","友","支持","效忠","追随"))}
+                if prv_ally - cur_ally:
+                    return True, "盟友流失"
             except Exception:
                 pass
-        if not should_reflect:
-            return
+        return False, ""
 
+    async def _reflect_batch(self, agents: list[DeductionAgentProfile],
+                              round_number: int, client: Any,
+                              deltas: dict[str, dict[str, float]]) -> None:
+        """批量反思：一次 LLM 调用处理多个角色的准则生成。"""
         from literarycreation.core.llm_client import Message
         from ._utils import extract_text as _extract
 
-        # 取角色的近期事件
-        my_events = [e for e in self._event_history[-20:]
-                     if e.get("agent") == eid or e.get("agent_name") == agent.name] if hasattr(self, "_event_history") else []
-        if self.graph is not None:
-            try:
-                my_events = self.graph.get_recent_events_for_agent(eid, last_n=8)
-            except Exception:
-                pass
-        events_text = "\n".join(
-            f"- [R{e.get('round','?')}] {e.get('description', e.get('content',''))[:80]}"
-            for e in my_events[-8:]
-        ) or "（无近期事件）"
-
+        agent_map: dict[str, DeductionAgentProfile] = {}
+        parts: list[str] = []
+        for agent in agents:
+            eid = agent.entity_id
+            prefix = eid[:6]
+            agent_map[prefix] = agent
+            my_events = [e for e in self._event_history[-20:]
+                         if e.get("agent") == eid or e.get("agent_name") == agent.name]
+            events_text = "\n".join(
+                f"- [R{e.get('round','?')}] {e.get('description', e.get('content',''))[:80]}"
+                for e in my_events[-8:]
+            ) or "（无）"
+            parts.append(
+                f"角色ID={prefix} 名称={agent.name} "
+                f"人格={agent.persona[:60]} "
+                f"现有准则={agent.system_prompt_extra or '无'} "
+                f"经历= {events_text}"
+            )
+        if not parts:
+            return
         prompt = (
-            f"你是「{agent.name}」的潜意识。回顾你的经历，判断你的性格是否需要微调。\n\n"
-            f"## 你的核心人格（不可动摇）\n{agent.persona or '（无）'}\n\n"
-            f"## 你已有的行为准则\n{agent.system_prompt_extra or '（无，完全依据核心人格）'}\n\n"
-            f"## 近期经历\n{events_text}\n\n"
-            f"## 触发原因\n{reason}\n\n"
-            f"## 任务\n"
-            f"根据经历，判断是否需要在核心人格之上添加一条新的行为准则（或修正旧准则）。\n"
-            f"核心人格不可动摇，新准则只能是对核心人格的策略性微调——角色经历了什么，"
-            f"所以变得怎样。\n"
-            f"- 输出格式：一行简短中文准则（20字以内），直接陈述。\n"
-            f"- 如果当前人格已足够应对，输出\"无需调整\"。\n"
-            f"- 准则上限3条，超限时替换最旧的一条。\n"
-            f"- 示例：\"遭受背叛后更谨慎选择盟友\" \"危急时刻敢于孤注一掷\"\n"
-            f"- 如果你的说话方式也因经历而发生了变化（如：变得更简短、更尖锐、不再用敬语），另起一行输出：\n"
-            f"  语风：简短描述（如\"每句话都像命令，不再用敬语\"）\n"
-            f"  没有变化则省略此行。\n"
-            f"\n只输出准则本身或\"无需调整\"，不要解释。"
+            f"以下 {len(parts)} 个角色正在经历故事转折。逐个审查——哪位需要新增行为准则？\n\n"
+            + "\n\n".join(f"## 角色 {j+1}\n{p}" for j, p in enumerate(parts))
+            + f"\n\n对每个角色输出严格一行：角色ID: 准则（20字以内） 或 角色ID: 无需调整。不要解释。"
         )
         try:
             resp = await client.chat(
                 [Message(role="user", content=prompt)],
-                system="你是潜意识分析师，输出简短行为准则或'无需调整'。",
+                system="你是潜意识分析师，逐行审查每个角色。每行格式：角色ID: 准则 或 角色ID: 无需调整。",
                 temperature=0.3,
-                max_tokens=60,
+                max_tokens=max(60, 40 * len(agents)),
             )
             text = _extract(resp).strip()
-            # 提取语言风格微调（"语风：..."）
-            style_update = ""
-            if "语风：" in text and "\n" not in text.split("语风：", 1)[-1][:20]:
-                parts = text.split("语风：", 1)
-                text = parts[0].strip()
-                style_update = parts[1].strip()[:30]
-            # 即使无调整也保存快照，防止下次基于旧快照高估变化量
-            if not text or "无需调整" in text or len(text) < 2:
-                if style_update and hasattr(agent, "speech_style"):
-                    agent.speech_style = style_update
-                self._reflect_counters[eid] = 0
-                self._last_reflect_round[eid] = round_number
-                cur = self._states.get(eid)
-                if cur is not None:
-                    self._last_reflect_snapshot[eid] = dict(cur.metrics)
-                if self.graph is not None:
-                    try:
-                        nb = self.graph.get_entity_neighbors(eid)
-                        self._last_reflect_relations[eid] = {
-                            n.get("relation","") or "": n.get("name","") or ""
-                            for n in nb.get("neighbors",[]) if n.get("relation") and n.get("name")
-                        }
-                    except Exception:
-                        pass
-                return
-            old_extra = agent.system_prompt_extra
-            if old_extra and text not in old_extra:
-                parts = [p.strip() for p in old_extra.split("；") if p.strip()]
-                if len(parts) >= 3:
-                    parts = parts[1:]
-                parts.append(text)
-                agent.system_prompt_extra = "；".join(parts)
-            elif not old_extra:
-                agent.system_prompt_extra = text
-            else:
-                return
-            if style_update and hasattr(agent, "speech_style"):
-                agent.speech_style = style_update
-            self._log("simulation",
-                       f"[人格演化] {agent.name} 新增准则: {text} (R{round_number}, {reason})")
+            for line in text.split("\n"):
+                line = line.strip()
+                if ":" not in line or len(line) < 6:
+                    continue
+                cid_part, rule = line.split(":", 1)
+                cid = cid_part.strip()[:8]
+                rule = rule.strip()[:40]
+                if "无需调整" in rule or len(rule) < 2:
+                    continue
+                agent = agent_map.get(cid[:6])
+                if agent is None:
+                    continue
+                old = agent.system_prompt_extra
+                if old and rule not in old:
+                    parts_old = [p.strip() for p in old.split("；") if p.strip()]
+                    if len(parts_old) >= 3:
+                        parts_old = parts_old[1:]
+                    parts_old.append(rule)
+                    agent.system_prompt_extra = "；".join(parts_old)
+                elif not old:
+                    agent.system_prompt_extra = rule
+                else:
+                    continue
+                self._log("simulation",
+                           f"[人格演化] {agent.name} 新增准则: {rule} (R{round_number})")
         except Exception as e:
-            logger.debug("[Simulator] 角色反思失败: %s", e)
-
-        # 重置计数器 + 保存快照
-        self._reflect_counters[eid] = 0
-        self._last_reflect_round[eid] = round_number
-        cur = self._states.get(eid)
-        if cur is not None:
-            self._last_reflect_snapshot[eid] = dict(cur.metrics)
-        # 保存当前关系快照（用于下次检测关系质变）
-        if self.graph is not None:
-            try:
-                nb = self.graph.get_entity_neighbors(eid)
-                self._last_reflect_relations[eid] = {
-                    n.get("relation", "") or "": n.get("name", "") or ""
-                    for n in nb.get("neighbors", []) if n.get("relation") and n.get("name")
-                }
-            except Exception:
-                pass
+            logger.debug("[Simulator] 批量反思失败: %s", e)
+        # 无论成功与否，重置所有参与角色的计数器
+        for agent in agents:
+            eid = agent.entity_id
+            self._reflect_counters[eid] = 0
+            self._last_reflect_round[eid] = round_number
+            cur = self._states.get(eid)
+            if cur is not None:
+                self._last_reflect_snapshot[eid] = dict(cur.metrics)
+            if self.graph is not None:
+                try:
+                    nb = self.graph.get_entity_neighbors(eid)
+                    self._last_reflect_relations[eid] = {
+                        n.get("relation","") or "": n.get("name","") or ""
+                        for n in nb.get("neighbors",[]) if n.get("relation") and n.get("name")
+                    }
+                except Exception:
+                    pass
 
     # ── Helpers ──
 
