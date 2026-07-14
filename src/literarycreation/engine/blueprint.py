@@ -157,7 +157,7 @@ async def generate_blueprint(
             [Message(role="user", content=prompt)],
             system="你是小说结构编辑，只输出规范 JSON 大纲。",
             temperature=0.4,
-            max_tokens=8192,
+            max_tokens=16384,
         )
         raw = extract_text(resp)
     except Exception as e:  # noqa: BLE001
@@ -167,7 +167,21 @@ async def generate_blueprint(
 
     blueprint = _parse_blueprint(raw, total_rounds)
     if blueprint is None:
-        _log("大纲解析失败或结构非法，降级自由续写")
+        logger.warning("[Blueprint] 解析失败，原始回复(前500字): %s", (raw or "")[:500])
+        raw_len = len(raw or "")
+        ends_with_brace = (raw or "").strip().endswith("}")
+        if not ends_with_brace and raw_len >= 15000:
+            logger.warning("[Blueprint] 疑似输出被截断 (长度=%d, max_tokens=16384)", raw_len)
+            _log(f"大纲解析失败——疑似输出被截断({raw_len}字符)")
+        else:
+            _log("大纲解析失败或结构非法，降级自由续写")
+        try:
+            from pathlib import Path
+            debug_path = Path("data") / "blueprint_debug.txt"
+            debug_path.write_text(raw or "", encoding="utf-8")
+            logger.info("[Blueprint] 原始回复已写入 %s", debug_path)
+        except Exception:
+            pass
         return None
     _style_info = (f"自动→采用素材风格「{blueprint.get('detected_style') or '—'}」"
                    if style_mode == "auto"
@@ -198,7 +212,7 @@ async def generate_blueprint(
             [Message(role="user", content=review_prompt)],
             system="你是小说编辑，审查故事大纲并修正结构问题。只输出 JSON。",
             temperature=0.3,
-            max_tokens=8192,
+            max_tokens=16384,
         )
         review_raw = extract_text(review_resp)
         reviewed = _parse_blueprint(review_raw, total_rounds)
