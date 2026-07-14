@@ -71,7 +71,7 @@ async def test_mode_a_freeform():
         agents=agents, graph=None, total_rounds=2,
         rule_engine=re, states=states,
         enable_narrate=False, persist_events=False,
-        mode="freeform",
+        mode="freeform", max_concurrent=1,
     )
 
     results_rounds: list = []
@@ -142,7 +142,7 @@ async def test_mode_b_blueline_with_prose():
         agents=agents, graph=None, total_rounds=2,
         rule_engine=re, states=states,
         enable_narrate=False, persist_events=False,
-        mode="blueline", event_scheduler=scheduler,
+        mode="blueline", event_scheduler=scheduler, max_concurrent=1,
     )
 
     rounds_data = []
