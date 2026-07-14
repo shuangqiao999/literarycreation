@@ -425,9 +425,8 @@ class DeductionOrchestrator:
         self._check_cancel()
         # 嵌入模型快速校验
         from literarycreation.core.providers import ProviderRegistry
-        from literarycreation.core.config import config as forge_config
         from .health_validator import validate_embedding_model
-        registry = ProviderRegistry(forge_config._get_data_dir())
+        registry = ProviderRegistry()  # None → 自动解析数据目录
         emb = registry.resolve_for_embedding()
         if emb.get("api_base") and emb.get("model_name"):
             validate_embedding_model(emb["api_base"], emb["model_name"], log_fn=self._log)
