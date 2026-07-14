@@ -171,15 +171,19 @@ async def main() -> int:
           f"{'不同（多动作生效，非空操作）' if differ else '相同（本次种子下巧合，非错误）'}")
 
     print("\n=== 阶段4：客观判胜负 ===")
-    from literarycreation.engine.optimizer import StrategyOptimizer
-    opt = StrategyOptimizer(None)
     scenario = {"name": "攻守兼顾", "directive": "合理分配资源",
-                "win_target": {"entity_ref": "甲军团", "metrics": {"strength": 30, "morale": 20},
-                               "threshold_logic": "all"}}
-    outcome = opt._judge_quantified(re_engine, states_multi, scenario)
-    assert 0.0 <= outcome.win_score <= 1.0 and 0.0 <= outcome.cost <= 1.0, "判定值越界"
-    print(f"  [判定] 甲军团 success={outcome.success} win_score={outcome.win_score} "
-          f"cost={outcome.cost}（{outcome.rationale}）")
+                 "win_target": {"entity_ref": "甲军团", "metrics": {"strength": 30, "morale": 20},
+                                "threshold_logic": "all"}}
+    wt = scenario["win_target"]
+    st = states_multi.get(wt.get("entity_ref", ""))
+    if st:
+        outcome = re_engine.judge(st, wt)
+        ws = float(outcome.get("win_score", 0.0))
+        cs = float(outcome.get("cost", 0.0))
+        ok = bool(outcome.get("success", False))
+        assert 0.0 <= ws <= 1.0 and 0.0 <= cs <= 1.0, "判定值越界"
+        print(f"  [判定] 甲军团 success={ok} win_score={ws:.2f} "
+              f"cost={cs:.2f}")
 
     print("\n[全部通过] 多动作资源分配功能全流程测试 OK")
     return 0
