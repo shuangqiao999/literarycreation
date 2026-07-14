@@ -645,6 +645,32 @@ class SimulationEngine:
             return self._downgrade(dec, agent,
                                    f"{agent.name}高疲劳高紧张({fatigue:.0f}/{tension:.0f})，"
                                    f"将{at}降级为观察以喘息")
+
+        # ── 关系可达性：ally和confess需要既有关系 ──
+        target = str(dec.get("target", "") or "").strip()
+        if target and at in ("ally", "confess"):
+            if hasattr(self, 'graph') and self.graph is not None:
+                try:
+                    nb = self.graph.get_entity_neighbors(agent.entity_id)
+                    neighbor_names = {n.get("name", "") for n in nb.get("neighbors", [])}
+                    if target not in neighbor_names:
+                        return self._downgrade(dec, agent,
+                            f"试图对'{target}'执行{at}，但双方无已知关系")
+                except Exception:
+                    pass
+
+        # ── 执行后状态合理性：模拟一次指标变化，防止执行后状态崩坏 ──
+        if hasattr(self, '_rule_engine') and self._rule_engine is not None:
+            self_d, _ = self._rule_engine.compute_deltas(
+                at, float(dec.get("intensity", 0.5)), state=state)
+            future = {k: state.get_metric(k) + self_d.get(k, 0) for k in state.metrics}
+            if at == "ally" and future.get("trust", 50) < 5:
+                return self._downgrade(dec, agent,
+                    f"执行{at}后信任将降至{future['trust']:.0f}，无法建立同盟")
+            if at in ("confront", "betray") and future.get("fatigue", 50) > 95:
+                return self._downgrade(dec, agent,
+                    f"执行{at}后疲劳将超过95，可能导致角色崩溃")
+
         return dec
 
     def _downgrade(self, dec: dict, agent: Any, reason: str) -> dict:
