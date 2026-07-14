@@ -1,189 +1,136 @@
-# LiteraryCreation — 文学创作助手
+# LiteraryCreation — 文学创作引擎
 
-**把小说续写与剧本复现变成可计算、可复现、可优化、可导出的创作实验。**
-
-LiteraryCreation 是一款本地优先的多智能体文学创作工具：以「一段小说开头」或「一份结构化提纲」为输入，自动构建人物关系图谱与角色人格，按"角色决策 → 情感/关系数值演化 → 反馈 → 情节推进"的闭环并行推演多轮，最终渲染为可导出的小说/剧本正文。它由 StrategyForge 的成熟推演架构剥离而来，专注创作场景，以「Python 后端 + Tauri 桌面应用」形态交付，可打包为独立安装包离线运行。
+**以一段小说开头或一份结构化提纲为输入，自动构建人物关系图谱与角色人格，逐轮推演角色交互，最终渲染为完整的文学正文。本地优先，Tauri 桌面应用形态交付。**
 
 ---
 
 ## 两大创作模式
 
-### ✍️ Mode 1 · 半部小说续写
-输入一部未完成的小说（如《红楼梦》前 80 回），系统自动提取人物、构建关系网、生成角色人格，推演出逻辑自洽、人物不 OOC 的后续情节，并渲染为续写正文。用户不提供结局约束，系统自行推演"最可能的发展路径"。
+### ✍️ 自由续写（Freeform）
+输入一段小说开头/种子文本。系统自动提取人物、构建关系网、生成角色人格，角色自主选择行动方向，推演出逻辑自洽的后续情节并渲染为正文。
 
-### 📋 Mode 2 · 提纲复现整部作品
-输入结构化提纲（角色设定 + 弧光 + 关键事件 + 结局状态），系统按提纲复现完整文学文本：
+### 📋 蓝图执行（Blueline）
+输入结构化提纲（角色设定 + 弧光 + 关键事件），系统按蓝图推演：
 
-- **按角色初值**：每个角色从提纲指定的初始状态（信任/张力/情感/权力…）出发。
-- **弧光门控（软）**：将 `initial_state → final_state` 线性插值为每轮目标带，偏离超阈值时自动注入纠偏软提示。
-- **事件门控（硬）**：提纲中的关键事件在指定轮次被强制推动（强制目标 + 高优先记忆注入）。
-- **结局对齐**：报告输出各角色弧光达成度（`final_state` 误差量化）。
+- **角色初值**：每个角色从提纲指定的初始状态出发。
+- **事件门控**：关键事件在指定轮次被强制推动（hard/soft/optional 三级）。
+- **弧光校准**：角色偏离弧光目标时，系统注入"内心两难"叙事引导（非强制回轨），让角色在目标与本能之间自然选择。
+- **结局对齐**：报告输出各角色弧光达成度。
 
 两种模式共用五阶段流水线，仅输入与约束方式不同。
 
 ---
 
-## 核心特性
+## 核心架构
 
-### 五阶段创作流水线
-本体生成 → GraphRAG 人物关系图谱 → 角色人格工厂 → 并行推演 → 散文渲染，全程自动化。
+### 五阶段流水线
 
-### 文学量化引擎（内置 `literary` 规则包）
-以 6 个文学指标驱动角色演化：`trust`（信任）/`tension`（张力）/`affection`（情感）/`power`（权力）/`mystery`（悬念）/`fatigue`（疲惫）。角色动作（`confront`/`confess`/`ally`/`betray`/`investigate`/`protect`/`manipulate`/`observe`）映射为结构化数值效应，含条件效应、延迟效应、自动衰减。5 个轻量算法模块：角色状态追踪（FSM）、提纲弧光门控、节奏分析、角色一致性检测、冲突递进追踪。规则包内置、开箱即用，无需配置。
+```
+种子文本 → Phase 1 本体生成 → Phase 1.6 故事蓝图 → Phase 2 知识图谱 → Phase 3 角色人格 → Phase 4 回合模拟 → Phase 5 散文渲染
+```
 
-### 散文/剧本渲染器
-Phase 5 将推演结果（角色最终状态 + 关键事件序列 + 原文风格参考）渲染为小说/剧本正文，含场景描写、人物对话、内心独白。支持叙事风格选择（现实主义 / 浪漫主义 / 悬疑 / 史诗 / 宫廷剧）。LLM 不可用时降级为结构化事件摘要，保证不中断。**支持一键导出为 UTF-8（含 BOM）`.txt`，Windows 记事本无乱码。**
+| 阶段 | 内容 |
+|------|------|
+| Phase 1 | LLM 定义实体/关系类型 |
+| Phase 1.5 | 加载文学风格规则包（5 种内置风格） |
+| Phase 1.6 | LLM 生成结构化故事蓝图（大纲/弧光/揭示节奏/麦高芬/知识缺口/主题/支线），含编辑审查 |
+| Phase 2 | 语义分块 + LanceDB 向量索引 + Kuzu 知识图谱构建 |
+| Phase 3 | 从图谱提取实体 → LLM 生成角色人格（含说话风格 `speech_style`） |
+| Phase 4 | 多角色并行模拟：决策 → 规则引擎计分 → 叙事记忆 → 人格反思 → 社会温度 |
+| Phase 5 | 散文渲染：逐章生成 → 正典校验 → 场景去重 → 修订流水线 → 合本导出 |
 
-### 多结局分支（蒙特卡洛）
-对同一提纲/种子跑 N 次隔离推演，得到 N 个差异化结局，输出戏剧张力/契合度/成本对比与推荐分支，供创作择优。
+---
 
-### 创作控制
-- **启动 / 暂停 / 继续**：任意轮次可暂停，进度持久化到 SQLite，重开应用可断点续写。
-- **实时干预**：创作中注入指令改变剧情走向（如"让角色 A 在第 5 轮背叛角色 B"）。
-- **创作愿景（pre-goal）**：为会话设定结局倾向，贯穿全轮次。
-- **状态实时同步**：SSE 事件驱动，界面实时显示五阶段进度。
+## 文学技艺模块（Phase 5 深度能力）
 
-### 人物关系与情感因果（Kuzu）
-人物关系网（RELATES，盟友/宿敌/亲属反哺决策）；情节时间线（Event/ACTED）；**情感因果链**（TARGETS/CAUSED，基于数值真值的精确归因，如「华妃 betray → 甄嬛 信任 −30」），驱动"情节脉络 / 人物影响链"可视化。
+| 模块 | 功能 |
+|------|------|
+| **叙述者声音代理** | 从种子文本一次性分析叙述者距离/节奏/手法/禁忌词，注入每章 |
+| **两阶段渲染** | 骨架生成（事件→因果叙事流）→ 肉身扩写（文学润色+对话丰富） |
+| **正典台账** | 死亡角色不可复活、麦高芬不可增殖、揭示层级防泄底 |
+| **高潮驱动器** | 中后期注入冲突升级引导 + 情感投资回报校验 |
+| **读者体验模拟** | 每章 LLM 模拟读者反馈（困惑度/无聊度/疲劳度/期待），反馈注入下一章 |
+| **修订流水线** | 全章生成后对被标记章节做编辑润色（抽象情感→感官细节、平淡对话→潜台词） |
+| **展示不告知** | Prompt 级强制：禁用"她感到愤怒"，改为感官动作传导情绪 |
+| **时间感** | 禁用"第二天一早"，改为物理细节标记时间流逝 |
+| **章尾钩子检测** | 检测章尾 300 字是否有悬念/反转/意象，缺失则提示 |
+| **节奏分析** | 动作密度 vs 反思密度，连续同向偏离时注入节奏建议 |
+| **故事重量平衡** | 跨章检测情节密度偏移，防止某章全是转折某章全是过渡 |
+| **主题追踪** | 蓝图定义主题 → 跨章检测出现频率 → 连续 3 章未触及提醒回响 |
+| **支线生命周期** | 支线 beats 调度 + 活跃期维持 + 结期收束提醒 |
+| **母题培养** | 区分蓄意重复（意象回响）vs 意外重复（口头禅），章首尾短语自动观察升级 |
+| **意象跨章追踪** | 10 组概念词网（水/火/牢笼/面具/路/伤口/光暗/归属/风/沉默）全局扫描连续性 |
+| **结局专属约束** | 最后一章：不可逆决定、余韵收尾、一个未回答的问题 |
+| **多 POV 交叉剪辑** | 多视角时每个视角独立渲染后交织 |
+| **对话风格事后检测** | 每章生成后检测角色对话是否符合 `speech_style` 约束 |
 
-### 语义记忆与检索（LanceDB）
-原著切片混合检索（向量 + 全文 FTS）+ 推演事件动态语义记忆 + 干预/目标显著性通道，带查询缓存。
+---
 
-### Token 统计
-每次 LLM 调用输入/输出 token 无侵入自动记录（`contextvars`），按阶段/轮次汇总，前端汇总卡片 + SVG 柱状图。
+## 模拟引擎能力（Phase 4）
 
-### 桌面应用
-Tauri 2 壳（系统托盘 + 自动拉起后端），React 18 前端含人物关系 3D 图、作品正文（可导出）、情节脉络/人物影响链、日志（实时 SSE）、Token 统计、多结局对比等视图，内置 LLM/嵌入模型配置页。
+| 模块 | 功能 |
+|------|------|
+| **复合情感合成** | 6 指标交叉映射 → 矛盾心理描述（如 trust 低 + affection 高 = "你心里装着一个人，但每次靠近都像踩薄冰"） |
+| **情感投资追踪** | 每轮记录角色感情投入额，高潮章校验回报比例 |
+| **社会温度系统** | 5 维自动累积：舆论/流言/派系张力/亲密压力/外部威胁 |
+| **人格动态反思** | 事件驱动批量触发（经历累积/指标剧变/关系质变/空闲保护），LLM 产出行为准则 + 语风演化 |
+| **私人记忆分类** | 情感关系独立队列（承诺/背叛/恩情/爱慕/仇恨），不受 FIFO 容量淘汰 |
+| **叙事记忆** | 每轮场景片段存入角色记忆，注入后续决策 |
+
+---
+
+## 5 种内置文学风格
+
+| 风格 | 特点 |
+|------|------|
+| `literary_realism` 现实主义 | 平衡指标，重日常细节 |
+| `literary_romance` 浪漫主义 | 高初始 affection，强情感效应 |
+| `literary_suspense` 悬疑 | 高初始 tension/mystery（70），调查研究 +18 mystery |
+| `literary_epic` 史诗 | 高初始 power，大冲突效应 |
+| `literary_court` 宫廷剧 | 权力博弈权重最高，强化 manipulate/betray 效果 |
+
+每个风格定义 6 个指标（trust/tension/affection/power/mystery/fatigue，0-100）+ 8 种动作（confront/confess/ally/betray/investigate/protect/manipulate/observe）+ 自身/目标效应 + 条件效应 + 自动衰减 + 延迟效应。
+
+---
+
+## 运维保护
+
+- **暂停/恢复**：任意轮次可暂停，完整快照持久化（EntityState + 情感投资 + agent 演化数据 + 反思状态），重开应用可断点续写
+- **轮级检查点**：每 3 轮自动写快照，防崩溃丢失全部进度
+- **Token 预算预检**：启动前估判消耗，超额时告警建议减章
+- **嵌入模型校验**：Phase 2 启动前快速校验嵌入模型可用性
+- **蓝图完整性校验**：生成后检测必填字段（logline/key_events/characters），缺失告警
+- **暂停快照隔离**：子系统序列化失败不会丢掉全部快照数据
+- **反思批量调用**：多角色需要反思时合并为一次 LLM 调用（不再 N 次独立调用）
 
 ---
 
 ## 技术架构
 
-- **后端**：Python 3.11 + FastAPI/uvicorn（`literarycreation.api:app`，默认 `http://127.0.0.1:8000`）。
-- **桌面端**：Tauri 2（Rust 壳，系统托盘 + 自动拉起/关闭后端）+ React 18 + TypeScript + Vite + react-force-graph-3d / three.js。
+- **后端**：Python 3.11 + FastAPI + uvicorn（`127.0.0.1:8760`）
+- **前端**：Tauri 2（Rust 壳，系统托盘 + 自动拉起/关闭后端）+ React 18 + TypeScript + Vite + react-force-graph-3d / three.js
 - **数据存储**：
-  - SQLite — 会话 / 日志 / 报告 / token 统计 / 暂停快照（`data/sessions.db`）
-  - Kuzu — 人物关系与情感因果图（`data/graphs/{session}/kuzu`）
-  - LanceDB — 向量/全文检索（`data/lancedb`）
-  - `data/forge_config.json` — 端点与模型配置
-- **LLM 接入**：OpenAI 兼容接口，统一 Provider 注册表，内置 28+ 厂商目录；对话与嵌入端点可分别配置。解析优先级：`forge_config.json` > `FORGE_*` 环境变量 > 厂商默认。
-- **算法依赖**：`numpy`（文学域使用规则引擎 + 5 个轻量算法模块，无需 scipy）
-- **许可证**：AGPL-3.0-only
-
-> **数据隔离**：桌面版运行期数据写入 `%LOCALAPPDATA%\LiteraryCreation\data`，与 StrategyForge 互不干扰。环境变量沿用 `FORGE_` 前缀，兼容既有配置。
+  - SQLite — 会话 / 日志 / 报告 / token 统计 / 暂停快照
+  - Kuzu — 人物关系图谱（实体/角色/事件/因果链）
+  - LanceDB — 语义向量检索（原著切片 + 动态事件）
+- **LLM 接入**：OpenAI 兼容接口，30+ 厂商注册表，对话与嵌入分别配置
+- **桌面版数据**：`%LOCALAPPDATA%\LiteraryCreation\data\`
 
 ---
 
 ## 快速开始
 
-### 1. 后端
-
 ```bash
-# 安装（项目根目录 E:\gongxiang\literarycreation）
+# 后端
 pip install -e .
+python run.py                       # http://127.0.0.1:8760
 
-# 配置：复制 .env.example 为 .env 并编辑（或在桌面应用「配置」页设置）
-cp .env.example .env
-
-# 启动开发服务器
-python run.py
-# 或：literary-creation serve
-```
-
-后端启动于 `http://127.0.0.1:8000`，文档 `http://127.0.0.1:8000/docs`，健康检查 `/health`。
-
-### 2. 前端（桌面应用）
-
-```bash
+# 前端
 cd apps/literary-creation
 npm install
-npm run dev        # 仅前端 (Vite, http://localhost:5173)
-# 或
-npx tauri dev      # 完整桌面应用（自动构建并联调）
+npm run dev                         # Vite http://localhost:5173
+npx tauri dev                       # 完整桌面应用
 ```
-
-> 推荐本地用 [LM Studio](https://lmstudio.ai) 或 Ollama 提供对话与嵌入模型；也可在「配置」页填写任意云端 OpenAI 兼容服务商。长篇续写（如《红楼梦》级）建议使用 12B 以上模型或云端 API。
-
----
-
-## 使用流程
-
-1. **新建会话**：填入标题与叙事风格，选择输入模式：
-   - **✍️ 种子续写**：粘贴小说开头/种子文本。
-   - **📋 提纲复现**：填写角色表（名称 / 弧光 / 初值·终值）与关键事件表（轮次 / 事件），章节数即推演轮数。
-2. **（可选）**：填写创作愿景（pre-goal）。
-3. **运行**：
-   - **「开始创作」**：跑一次完整五阶段推演；运行中可停止。
-   - **「继续」**：从上次暂停轮次恢复。
-   - **「多结局」**：对同一输入做蒙特卡洛，输出多个结局分支。
-4. **查看**：
-   - **作品**：文学正文（可折叠）+ **⬇ 导出 TXT**；提纲模式额外显示弧光达成度。
-   - **人物关系**：3D 关系网（盟友/宿敌/亲属）。
-   - **情节脉络 / 人物影响链**：谁先做什么、对谁造成什么情感后果；点击节点查看关联文本。
-   - **日志**：实时 SSE。
-   - **Token**：汇总卡片 + 柱状图。
-5. **干预**：创作中在底部输入框发送指令，改变剧情走向。
-
----
-
-## 环境变量
-
-所有带 `FORGE_` 前缀的环境变量均有 `data/forge_config.json` 覆盖机制。
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `FORGE_LLM_BASE` | `http://127.0.0.1:1234/v1` | 对话模型 API 地址 |
-| `FORGE_LLM_KEY` | `lm-studio` | 对话模型 API Key |
-| `FORGE_LLM_MODEL` | `qwen/qwen3.5-9b` | 对话模型 ID |
-| `FORGE_EMBED_BASE` | 同 LLM | 嵌入模型 API 地址 |
-| `FORGE_EMBED_MODEL` | `text-embedding-embeddinggemma-300m-qat` | 嵌入模型 ID |
-| `FORGE_PROVIDER` | （空） | 默认厂商标识（如 `lmstudio` / `openai`） |
-| `FORGE_MAX_AGENTS` | `10000` | 最大角色数 |
-| `FORGE_DEFAULT_ROUNDS` | `10` | 默认推演轮数（章节数） |
-| `FORGE_MAX_CONCURRENT` | `2` | 并发 LLM 请求上限 |
-| `FORGE_RETRIEVE_TOP_K` | `5` | LanceDB 检索返回 Top-K |
-| `FORGE_SIMILARITY_THRESHOLD` | `0.4` | 语义检索相似度阈值 |
-| `FORGE_DATA_DIR` | `./data` | 运行期数据目录（桌面版：`%LOCALAPPDATA%\LiteraryCreation\data`） |
-| `FORGE_RULE_DIR` | （空） | 内置规则包目录（桌面打包时由 Tauri 壳设置） |
-
-> 以上默认值为 `core/config.py` 中 `DeductionConfig` 的硬编码值；`.env.example` 仅作示例。
-
----
-
-## `literary` 规则包
-
-文学量化的核心驱动组件，将角色的离散决策映射为结构化情感/关系数值效应。内置于 `data/rule/rules.json` 的 `literary` 域，无需用户配置。
-
-```json
-{
-  "domain": "literary",
-  "display_name": "文学叙事",
-  "metrics": ["trust", "tension", "affection", "power", "mystery", "fatigue"],
-  "thresholds": {},
-  "actions": ["confront", "confess", "ally", "betray", "investigate", "protect", "manipulate", "observe"],
-  "self_effects": { "betray": {"trust": -40, "tension": 30, "affection": -30, "power": 10} },
-  "target_effects": { "betray": {"trust": -30, "tension": 20, "affection": -20} },
-  "conditional_effects": { "confess_risky": {"condition": "affection > 60 and trust > 40", "self_effects": {"affection": 25}} },
-  "auto_effects": { "tension_decay": {"condition": "tension > 40", "effects": {"tension": -3, "trust": 1}} },
-  "modules": {
-    "pipeline": { "order": ["outline_control", "pacing_analyzer", "character_consistency", "conflict_progression", "finite_state_machine"] },
-    "outline_control": { "deviation_threshold": 12.0, "catch_up_window": 2 },
-    "pacing_analyzer": { "stall_threshold": 3, "rush_threshold": 30.0, "plateau_rounds": 4 },
-    "character_consistency": { "warn_threshold": 0.7 },
-    "conflict_progression": { "climax_min_tension": 65.0, "early_drop_threshold": 30.0 },
-    "finite_state_machine": { "default_state": "neutral", "command_states": ["crisis"], "...": "..." }
-  }
-}
-```
-
-- `thresholds` 置空：角色不因数值被自动"淘汰"，去留由剧情决定。
-- `outline_control`：Mode 2 弧光门控模块。
-- `pacing_analyzer`：节奏分析（事件密度/指标变化速度）。
-- `character_consistency`：角色一致性检测（行为与指标矛盾标记）。
-- `conflict_progression`：冲突递进追踪（张力弧线验证）。
-- 无 ODE/物理模块：文学指标为离散演化。
-
-> 保留的战略领域规则包（军事/商业/政治/生态/城市/科技/信息战/地缘）仍在 `rules.json` 中，但前端锁定为文学叙事。
 
 ---
 
@@ -192,39 +139,59 @@ npx tauri dev      # 完整桌面应用（自动构建并联调）
 ### 会话
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/upload` | 上传种子材料文件 |
-| POST | `/session` | 创建会话（`config.outline` 传提纲、`config.style` 传风格） |
+| POST | `/upload` | 上传种子材料文件（txt/md/pdf/docx 等） |
+| POST | `/session` | 创建会话（`config.total_rounds` 设章数、`config.target_words` 设总字数） |
 | GET | `/sessions` | 会话列表 |
-| GET | `/session/{id}` | 会话详情 |
 | DELETE | `/session/{id}` | 删除会话（连带清理 Kuzu/LanceDB） |
 
 ### 创作控制
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/session/{id}/start` | 启动创作（新建或从暂停恢复） |
-| POST | `/session/{id}/pause` / `/resume` | 暂停 / 继续 |
-| POST | `/session/{id}/intervene` | 实时干预（改变剧情走向） |
-| POST | `/session/{id}/pre-goal` | 设定创作愿景 |
-| POST | `/session/{id}/settings` | 会话级设置 |
+| POST | `/session/{id}/start` | 启动创作 |
+| POST | `/session/{id}/pause` | 暂停 |
+| POST | `/session/{id}/resume` | 继续 |
+| POST | `/session/{id}/intervene` | 实时干预 |
+| POST | `/session/{id}/pre-goal` | 创作愿景 |
+| POST | `/session/{id}/fsm-override` | 强制角色动作 |
 
 ### 数据查询
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/session/{id}/graph` | 人物关系图谱 |
+| GET | `/session/{id}/graph` | 人物关系图 |
 | GET | `/session/{id}/timeline` | 情节时间线 |
-| GET | `/session/{id}/causal` | 人物影响链（TARGETS/CAUSED） |
-| GET | `/session/{id}/report` | 作品报告（含 `prose` / `arc_alignment`） |
-| GET | `/session/{id}/logs` | 会话日志 |
+| GET | `/session/{id}/causal` | 因果影响链 |
+| GET | `/session/{id}/report` | 作品报告 |
+| GET | `/session/{id}/logs` | 日志 |
 | GET | `/session/{id}/tokens` | Token 统计 |
-| GET | `/session/{id}/stream` | SSE 实时事件流 |
+| GET | `/session/{id}/stream` | SSE 实时流 |
 
-### 多结局 / 配置
+### 配置
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/session/{id}/optimize` | 启动多结局蒙特卡洛 |
-| GET | `/session/{id}/optimize/result` | 进度与结果轮询 |
-| GET/POST | `/config/llm` · `/config/embedding` | 端点与模型配置 |
-| POST | `/config/test-connection` | 测试端点连通性 |
+| GET/POST | `/config/llm` | LLM 配置 |
+| GET/POST | `/config/embedding` | 嵌入模型配置 |
+| GET/POST | `/config/engine` | 引擎参数 |
+| GET | `/config/providers` | 厂商列表 |
+| POST | `/config/test-connection` | 连接测试 |
+| POST | `/config/list-models` | 获取模型列表 |
+| GET | `/domains` | 风格领域列表 |
+
+---
+
+## 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `FORGE_LLM_BASE` | 对话模型 API 地址 |
+| `FORGE_LLM_MODEL` | 对话模型 ID |
+| `FORGE_LLM_KEY` | 对话模型 API Key |
+| `FORGE_EMBED_BASE` | 嵌入模型 API 地址 |
+| `FORGE_EMBED_MODEL` | 嵌入模型 ID |
+| `FORGE_PROVIDER` | LLM 厂商 slug |
+| `FORGE_DATA_DIR` | 数据目录（桌面版自动指向 `%LOCALAPPDATA%\LiteraryCreation\data`） |
+| `FORGE_RULE_DIR` | 内置规则包目录 |
+| `FORGE_MAX_CONCURRENT` | 并发 LLM 请求上限 |
+| `FORGE_DEFAULT_ROUNDS` | 默认章数 |
 
 ---
 
@@ -233,40 +200,40 @@ npx tauri dev      # 完整桌面应用（自动构建并联调）
 ```
 literarycreation/
 ├── src/literarycreation/
-│   ├── algorithms/       # 轻量写作辅助模块（FSM / 提纲门控 / 节奏分析 / 一致性 / 冲突递进 / 管线调度）
-│   ├── core/             # 配置 / Provider 注册表 / LLM 适配 / Token 统计 / 分块器
-│   ├── engine/           # 五阶段流水线 + 规则引擎 + 优化器 + prose_renderer🆕 + 预处理器 + 推理器
-│   ├── storage/          # SQLite 会话库 + Kuzu 图库
-│   └── api/              # FastAPI 路由 + SSE 事件流 + 配置路由
-├── apps/literary-creation/       # Tauri 2 桌面应用（React 18 + 3D 图）
-│   └── src-tauri/                # Rust 壳（子进程管理 + 系统托盘 + NSIS 打包）
-├── data/rule/rules.json          # 规则包（含 literary 域）
-├── scripts/  tests/              # 测试脚本与用例
-├── pyproject.toml  run.py
-└── literary-creation-backend.spec  # PyInstaller 打包配置
+│   ├── core/                   # 配置 / LLM 客户端 / Provider 注册表 / Token 统计 / prompt 自适应
+│   ├── engine/                 # 五阶段流水线 + 规则引擎 + 模拟器 + 散文渲染器
+│   │   ├── emotional_engine.py    # 复合情感合成 + 投资追踪
+│   │   ├── craft_guard.py         # 场景权重分配 + 母题培养
+│   │   ├── narrator_broker.py     # 叙述者声音代理
+│   │   ├── reader_model.py        # 读者体验模拟
+│   │   ├── revision_pipeline.py   # 编辑修订流水线
+│   │   ├── imagery_tracker.py     # 意象跨章追踪
+│   │   ├── health_validator.py    # 嵌入模型/蓝图校验
+│   │   └── ...
+│   ├── storage/                # SQLite 会话库 + Kuzu 图库
+│   └── api/                    # FastAPI 路由 + SSE 流
+├── apps/literary-creation/     # Tauri 2 桌面应用
+│   └── src-tauri/              # Rust 壳
+├── data/rule/rules.json        # 5 种内置文学风格规则包
+├── tests/ scripts/             # 测试与脚本
+└── pyproject.toml
 ```
 
 ---
 
-## 打包与发布（Windows）
+## 已知边界
 
-```bash
-# 后端（onedir）
-python -m PyInstaller literary-creation-backend.spec --noconfirm
-
-# 前端 + Tauri 桌面安装包
-cd apps/literary-creation
-npm run build
-npx tauri build --bundles nsis
-```
-
-产物：
-- 应用：`apps/literary-creation/src-tauri/target/release/literary-creation.exe`
-- 安装包：`.../bundle/nsis/LiteraryCreation_0.1.0_x64-setup.exe`
-- 后端：`dist/literary-creation-backend/`
+| 擅长 | 不擅长 |
+|------|--------|
+| 情节驱动的中长篇现代小说（≤20 章） | ＞20 章时 `story_state` 累积文本稀释 prompt |
+| 多角色群像悬疑/推理 | 单一主角深度心理小说 |
+| 有明确终点的收束型故事 | 意识流/实验叙事 |
+| 第三人称有限/全知 | 第一人称 |
+| 5 种内置风格的纯类型 | 混合类型（科幻悬疑爱情） |
+| 现代白话 | 古典话本/文言/诗词 |
 
 ---
 
-## 致谢
+## 许可证
 
-LiteraryCreation 由 **StrategyForge**（多智能体战略推演引擎）剥离改造而来，复用其五阶段流水线、规则引擎、FSM、GraphRAG、蒙特卡洛优化器与桌面外壳，聚焦文学创作场景。
+AGPL-3.0-only
