@@ -165,6 +165,24 @@ class DeductionEngine:
     def cleanup_events(self, session_id: str) -> None:
         self._stream_events.pop(session_id, None)
         self._round_data.pop(session_id, None)
+        if hasattr(self, '_optimize_data'):
+            self._optimize_data.pop(session_id, None)
+
+    # ── 策略优化器 SSE 进度 ──
+    def signal_optimize_progress(self, session_id: str, idx: int, total: int,
+                                  detail: dict[str, Any] | None = None) -> None:
+        if not hasattr(self, '_optimize_data'):
+            self._optimize_data: dict[str, Any] = {}
+        self._optimize_data[session_id] = {
+            "idx": idx, "total": total,
+            "detail": detail or {},
+        }
+        ev = self._stream_events.get(session_id)
+        if ev:
+            ev.set()
+
+    def get_optimize_data(self, session_id: str) -> dict[str, Any]:
+        return getattr(self, '_optimize_data', {}).get(session_id, {})
 
     # ── 用户强制动作 override ──
     def get_fsm_override_store(self, session_id: str) -> dict[str, dict]:
