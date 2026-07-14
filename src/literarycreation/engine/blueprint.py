@@ -177,7 +177,9 @@ async def generate_blueprint(
             _log("大纲解析失败或结构非法，降级自由续写")
         try:
             from pathlib import Path
-            debug_path = Path("data") / "blueprint_debug.txt"
+            from literarycreation.core.config import config as _cfg
+            debug_path = _cfg.deduction_data_dir / "blueprint_debug.txt"
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
             debug_path.write_text(raw or "", encoding="utf-8")
             logger.info("[Blueprint] 原始回复已写入 %s", debug_path)
         except Exception:

@@ -436,6 +436,7 @@ class DeductionPreprocessor:
 
         # 清理上次运行的旧表，确保每次重跑从干净状态开始
         self.drop_tables()
+        self._recall_cache.clear()
 
         # 1. semantic chunking
         chunker = TextChunker(strategy="paragraph", max_chunk_size=1536)
