@@ -1,7 +1,6 @@
 """Deduction Orchestrator — five-stage pipeline coordinator with pause/resume."""
 from __future__ import annotations
 
-import asyncio
 import json as _json
 import logging
 from collections.abc import Callable
@@ -74,15 +73,12 @@ class DeductionOrchestrator:
         self._rule_engine: Any = None
         self._states: dict[str, Any] = {}
         self._enable_narrate: bool = True
-        self._enable_multi_action: bool = False
-        self._max_actions: int = 3
         self._style: str = "现实主义"
         self._outline: dict[str, Any] | None = None
         self._target_words: int = 0
         self._canon_retries: int = 2
         self._scene_retries: int = 2
         self._quality_warnings: list[str] = []  # 章节级质量警告，供API报告和重跑反馈
-        self._states_lock = asyncio.Lock()  # 守卫 _states 的跨协程读写
         self._auto_blueprint: bool = True
         self._last_canon_conflicts: list[str] = []
         self._style_mode: str = "manual"
@@ -775,7 +771,7 @@ class DeductionOrchestrator:
         # 社会氛围（从模拟引擎温度计编译为叙事氛围文本）
         sim = getattr(self, "_simulation_engine", None)
         if sim is not None:
-            atmosphere = _build_atmosphere_text(getattr(sim, "_social_thermometer", {}))
+            atmosphere = _build_atmosphere_text(getattr(sim, "social_thermometer", {}))
             if atmosphere:
                 story_ctx = atmosphere + "\n\n" + story_ctx
         # 叙述者声音（全书一致，内部已生成）
@@ -1129,10 +1125,7 @@ class DeductionOrchestrator:
         self._motif_tracker = MotifTracker()
         self._per_ch = per_ch
 
-        # 情感投资数据（从模拟器传出，存 story_state 供高潮驱动用）
-        sim = getattr(self, "_simulation_engine", None)
-        if sim and hasattr(sim, "_emotional_investment"):
-            inv_data = sim._emotional_investment.to_dict()
+        # 情感投资数据暂存，待 story_state 初始化后注入
 
         chapters_meta: list[dict[str, Any]] = []
         full_parts: list[str] = []
@@ -1169,6 +1162,13 @@ class DeductionOrchestrator:
                 story_state["theme_appearances"] = {}
             if outline and outline.get("subplots"):
                 story_state["subplots"] = outline["subplots"]
+            # 情感投资数据注入 story_state（供高潮驱动校验）
+            sim_s = getattr(self, "_simulation_engine", None)
+            if sim_s and hasattr(sim_s, "_emotional_investment"):
+                try:
+                    story_state["emotional_investment"] = sim_s._emotional_investment.to_dict()
+                except Exception:
+                    pass
             canon = CanonLedger.from_state(story_state, blueprint=outline)
             alive_checker = (lambda st: self._rule_engine.is_alive(st)) if self._rule_engine else None
             from .climax_driver import ClimaxDriver

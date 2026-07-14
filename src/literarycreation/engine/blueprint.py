@@ -362,4 +362,10 @@ def normalize_blueprint(data: dict[str, Any], total_rounds: int) -> dict[str, An
         "characters": characters,
         "chapters": sorted(chapters, key=lambda x: x["round"]),
         "key_events": sorted(key_events, key=lambda x: x["round"]),
+        "knowledge_gaps": [g for g in (data.get("knowledge_gaps") or [])
+                           if isinstance(g, dict) and g.get("character")],
+        "themes": [t for t in (data.get("themes") or [])
+                   if isinstance(t, dict) and t.get("name")],
+        "subplots": [s for s in (data.get("subplots") or [])
+                     if isinstance(s, dict) and s.get("name")],
     }

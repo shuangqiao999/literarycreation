@@ -125,15 +125,18 @@ class DeductionGraphStore:
                   timestamp: str, agent_id: str = "", round_number: int = 0,
                   target_id: str = "", effect: str = "", driver: str = "") -> None:
         self._check_conn()
+        # 简单转义：单引号 + 反斜杠（防止 '\\'' 级联转义）
+        def _esc(s: str) -> str:
+            return (s or "").replace("\\", "\\\\").replace("'", "\\'")
         safe = {
-            "id": event_id.replace("'", "\\'"),
-            "desc": description.replace("'", "\\'")[:500],
-            "type": event_type.replace("'", "\\'"),
-            "ts": timestamp.replace("'", "\\'"),
-            "aid": agent_id.replace("'", "\\'"),
-            "tid": (target_id or "").replace("'", "\\'"),
-            "eff": (effect or "").replace("'", "\\'")[:200],
-            "drv": (driver or "").replace("'", "\\'")[:16],
+            "id": _esc(event_id),
+            "desc": _esc(description)[:500],
+            "type": _esc(event_type),
+            "ts": _esc(timestamp),
+            "aid": _esc(agent_id),
+            "tid": _esc(target_id or ""),
+            "eff": _esc(effect or "")[:200],
+            "drv": _esc(driver or "")[:16],
         }
         rnd = int(round_number)
         with self._lock:

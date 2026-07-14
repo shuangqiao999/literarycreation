@@ -85,6 +85,8 @@ class SimulationEngine:
             "intimate_pressure": 20.0,
             "external_threat": 10.0,
         }
+        # 公开属性供 orchestrator 读取
+        self.social_thermometer: dict[str, float] = self._social_thermometer
         # 行动类型 → 社会温度变化
         self._SOCIAL_HEAT_MAP: dict[str, dict[str, float]] = {
             "confront": {"faction_polarity": 8, "rumor_intensity": 5},
