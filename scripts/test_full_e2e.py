@@ -10,12 +10,12 @@ Tests the complete 5-phase pipeline:
 """
 from __future__ import annotations
 
-import asyncio, os, sys, time, traceback
+import asyncio, os, sys, time, tempfile, traceback
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-os.environ.setdefault("FORGE_DATA_DIR", os.path.join(os.environ.get("TEMP", "."), "lit_e2e"))
+os.environ["FORGE_DATA_DIR"] = os.path.join(tempfile.mkdtemp(prefix="lit_e2e_"), ".forge")
 os.environ.setdefault("FORGE_PROVIDER", "lmstudio")
 os.environ.setdefault("FORGE_LLM_BASE", "http://127.0.0.1:1234/v1")
 os.environ.setdefault("FORGE_LLM_MODEL", "qwen3.5-2b")

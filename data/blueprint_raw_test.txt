@@ -1,111 +1,102 @@
 {
-  "title": "听雨阁的暗语",
+  "title": "听雨阁的铜钱",
   "detected_style": "悬疑/黑色幽默",
   "initial_state": {
     "trust": 65.0,
     "tension": 85.0,
     "affection": 40.0,
     "power": 70.0,
-    "mystery": 90.0,
+    "mystery": 95.0,
     "fatigue": 20.0,
     "initial_state/final_state": {
       "trust": 65.0,
       "tension": 85.0,
       "affection": 40.0,
       "power": 70.0,
-      "mystery": 90.0,
+      "mystery": 95.0,
       "fatigue": 20.0,
-      "initial_state/final_state": null
+      "initial_state": {
+        "trust": 65.0,
+        "tension": 85.0,
+        "affection": 40.0,
+        "power": 70.0,
+        "mystery": 95.0,
+        "fatigue": 20.0
+      },
+      "final_state": {
+        "trust": 85.0,
+        "tension": 60.0,
+        "affection": 70.0,
+        "power": 90.0,
+        "mystery": 10.0,
+        "fatigue": 40.0,
+        "initial_state/final_state": {
+          "trust": 85.0,
+          "tension": 60.0,
+          "affection": 70.0,
+          "power": 90.0,
+          "mystery": 10.0,
+          "fatigue": 40.0
+        }
+      }
     }
-  },
-  "established_facts": {
-    "deaths": [
-      "沈父"
-    ],
-    "before_story": true
   },
   "characters": {
-    "protagonist": {
-      "name": "刘谦",
-      "role": "叙述者与执行者",
-      "first_appearance": 1,
-      "last_appearance": 10,
-      "exit": 10
-    },
-    "antagonist": {
-      "name": "沈爷",
-      "role": "神秘导师/幕后黑手",
-      "first_appearance": 1,
-      "last_appearance": 5,
-      "exit": 5
-    },
-    "supporting_1": {
-      "name": "老匠人",
-      "role": "古董修复师",
-      "first_appearance": 3,
-      "last_appearance": 7,
-      "exit": 8
-    },
-    "supporting_2": {
-      "name": "小贩",
-      "role": "巷口叫卖者",
-      "first_appearance": 1,
-      "last_appearance": 5,
-      "exit": 5
-    }
-  },
-  "chapters": [
-    {
-      "round": 1,
-      "goal": "建立场景与人物关系，确认交易动机",
-      "solves": "刘谦用铜钱换取沈爷的信任，确认交易性质为'非杀人'",
-      "hook": "沈爷对刘谦的警惕远超寻常买家",
-      "scene_seeds": [
-        {
-          "type": "环境",
-          "description": "巷口青石板被晨雾压得低低的，光线昏暗，空气中弥漫着陈旧纸张和霉味"
-        },
-        {
-          "type": "感官",
-          "description": "刘谦推门时带进冷风，与沈爷身上淡淡的药酒味形成对比"
-        },
-        {
-          "type": "动作",
-          "description": "沈爷指尖在碗沿停驻的时间过长，仿佛怕惊扰了什么"
+    "沈爷": {
+      "initial_state": {
+        "trust": 65.0,
+        "tension": 85.0,
+        "affection": 40.0,
+        "power": 70.0,
+        "mystery": 95.0,
+        "fatigue": 20.0,
+        "initial_state/final_state": {
+          "trust": 85.0,
+          "tension": 60.0,
+          "affection": 70.0,
+          "power": 90.0,
+          "mystery": 10.0,
+          "fatigue": 40.0,
+          "initial_state/final_state": {
+            "trust": 85.0,
+            "tension": 60.0,
+            "affection": 70.0,
+            "power": 90.0,
+            "mystery": 10.0,
+            "fatigue": 40.0
+          }
         }
-      ]
-    },
-    {
-      "round": 2,
-      "goal": "揭示交易的具体内容，试探心理防线",
-      "solves": "确认定金为'铜钱'，暗示某种契约或交换物",
-      "hook": "沈爷的眼神让刘谦感到莫名的恐惧而非贪婪",
-      "scene_seeds": [
-        {
-          "type": "细节",
-          "description": "那枚铜钱被折了三折，边缘磨损处露出暗红色的金属光泽"
-        },
-        {
-          "type": "心理",
-          "description": "刘谦注意到沈爷没有碰铜钱，而是盯着他手腕上的绷带"
+      },
+      "final_state": {
+        "trust": 85.0,
+        "tension": 60.0,
+        "affection": 70.0,
+        "power": 90.0,
+        "mystery": 10.0,
+        "fatigue": 40.0,
+        "initial_state/final_state": {
+          "trust": 85.0,
+          "tension": 60.0,
+          "affection": 70.0,
+          "power": 90.0,
+          "mystery": 10.0,
+          "fatigue": 40.0
         }
-      ]
+      }
     },
-    {
-      "round": 3,
-      "goal": "深入对话，挖掘沈爷的过往与理念",
-      "solves": "沈爷解释为何不杀人，引出'规矩得改一改'的核心冲突",
-      "hook": "刘谦意识到自己可能卷入了一场关于生死的博弈",
-      "scene_seeds": [
-        {
-          "type": "环境",
-          "description": "听雨阁角落的条凳上坐着一个人，面前粗瓷碗里的茶面浮着油花"
-        },
-        {
-          "type": "对话",
-          "description": "沈爷的声音低得像桌底的灰尘，刘谦宁愿他大声吼出来"
-        }
-      ]
-    },
-    {
-      "round":
+    "刘谦": {
+      "initial_state": {
+        "trust": 85.0,
+        "tension": 90.0,
+        "affection": 60.0,
+        "power": 40.0,
+        "mystery": 70.0,
+        "fatigue": 15.0,
+        "initial_state/final_state": {
+          "trust": 85.0,
+          "tension": 60.0,
+          "affection": 70.0,
+          "power": 90.0,
+          "mystery": 10.0,
+          "fatigue": 40.0,
+          "initial_state
