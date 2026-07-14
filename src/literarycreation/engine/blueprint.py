@@ -213,18 +213,28 @@ async def generate_blueprint(
 
 def _parse_blueprint(raw: str, total_rounds: int) -> dict[str, Any] | None:
     """从 LLM 原始输出解析并规范化 blueprint；结构非法返回 None。"""
-    match = re.search(r"\{[\s\S]*\}", raw or "")
+    # 剥离 markdown 代码块标记
+    cleaned_raw = raw or ""
+    if "```" in cleaned_raw:
+        cleaned_raw = re.sub(r'```(?:json\s*)?', '', cleaned_raw)
+        cleaned_raw = cleaned_raw.replace('```', '')
+    match = re.search(r"\{[\s\S]*\}", cleaned_raw)
     if not match:
         return None
     try:
         data = json.loads(match.group(0))
     except json.JSONDecodeError:
-        # 容错：尝试去除尾随逗号
+        # 容错1：尝试去除尾随逗号
         cleaned = re.sub(r",\s*([}\]])", r"\1", match.group(0))
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            return None
+            # 容错2：去除非法控制字符
+            cleaned2 = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', cleaned)
+            try:
+                data = json.loads(cleaned2)
+            except json.JSONDecodeError:
+                return None
     if not isinstance(data, dict):
         return None
     return normalize_blueprint(data, total_rounds)
@@ -318,7 +328,7 @@ def normalize_blueprint(data: dict[str, Any], total_rounds: int) -> dict[str, An
     for e in data.get("key_events") or []:
         if not isinstance(e, dict):
             continue
-        desc = str(e.get("event", e.get("description", "")) or "").strip()
+        desc = str(e.get("event", e.get("description", e.get("content", ""))) or "").strip()
         if not desc:
             continue
         level = str(e.get("level", "hard")).strip().lower()
