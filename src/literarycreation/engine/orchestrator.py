@@ -608,9 +608,10 @@ class DeductionOrchestrator:
                 self.store.update(self.session.id,
                                    token_json=_json.dumps(stats, ensure_ascii=False))
 
-            # 每 3 轮写一次检查点（防崩溃丢失全部进度）
+            # 每 3 轮写一次检查点（防崩溃丢失全部进度），写完后立刻恢复模拟状态
             if rnd % 3 == 0 and rnd < total_rounds:
                 self._save_pause_snapshot(self.session.id)
+                self.store.update(self.session.id, status=SessionStatus.SIMULATING.value)
                 self._log("simulation", f"  已写入第 {rnd} 轮检查点")
 
         self._simulation_rounds = rounds
