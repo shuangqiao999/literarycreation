@@ -198,20 +198,15 @@ class CanonLedger:
                 except Exception:
                     pass
 
-        # (b) 文本死亡标记（补充）—— 仅登记已知角色名，避免误伤
+        # (b) 文本死亡标记（补充）—— 仅登记已有known_names且与死亡标记在同一句中的角色
         if text and self.macguffins is not None:
             known_names = set(self.dead.keys())
-            # 从 snapshots 收集候选角色名
-            if snapshots:
-                for _eid, st in snapshots.items():
-                    nm = st.get("name") if isinstance(st, dict) else getattr(st, "name", None)
-                    if nm:
-                        known_names.add(nm)
             for s in re.split(r"[。！？\n]", text):
                 if not any(mk in s for mk in _DEATH_MARKERS):
                     continue
                 if any(ctx in s for ctx in ("如果", "假如", "仿佛", "好像", "梦")):
                     continue
+                # 仅对已死者做"追认"：死亡标记所在句中出现已知名字 → 确认登记
                 for nm in known_names:
                     if nm and nm in s and nm not in self.dead:
                         self.dead[nm] = chapter_idx
