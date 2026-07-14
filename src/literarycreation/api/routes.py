@@ -472,8 +472,8 @@ async def get_tokens(session_id: str, request: Request):
 # ── SSE Stream ──
 
 _RUNNING_STATUSES = frozenset({
-    "ontology_running", "graph_running", "agents_running",
-    "simulating", "reporting", "optimizing",
+    "ontology_running", "blueprint_running", "graph_running", "agents_running",
+    "simulating", "reporting",
 })
 
 _TERMINAL_STATUSES = frozenset({"complete", "failed", "paused"})
@@ -518,34 +518,40 @@ async def stream_deduction(session_id: str, request: Request):
                 pass
             ev.clear()
 
-            # ── push new log entries ──
-            logs = engine.get_logs(session_id, limit=-1)
-            new_logs = [l for l in logs if l.get("id", 0) > last_log_id]
-            for log_entry in new_logs:
-                last_log_id = max(last_log_id, log_entry.get("id", 0))
-                yield f"data: {json.dumps(log_entry, ensure_ascii=False)}\n\n"
+            try:
+                # ── push new log entries ──
+                logs = engine.get_logs(session_id, limit=-1)
+                new_logs = [l for l in logs if l.get("id", 0) > last_log_id]
+                for log_entry in new_logs:
+                    last_log_id = max(last_log_id, log_entry.get("id", 0))
+                    yield f"data: {json.dumps(log_entry, ensure_ascii=False)}\n\n"
 
-            # ── push round-complete event (triggers graph/timeline/dashboard refresh) ──
-            rd = engine.get_round_data(session_id)
-            cr = rd.get("round", 0)
-            if cr > last_round:
-                last_round = cr
-                payload: dict[str, Any] = {"type": "round", "round": cr, "total": rd.get("total", 0)}
-                snap = engine.get_round_snapshot(session_id)
-                if snap:
-                    payload["snapshot"] = snap
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                # ── push round-complete event (triggers graph/timeline/dashboard refresh) ──
+                rd = engine.get_round_data(session_id)
+                cr = rd.get("round", 0)
+                if cr > last_round:
+                    last_round = cr
+                    payload: dict[str, Any] = {"type": "round", "round": cr, "total": rd.get("total", 0)}
+                    snap = engine.get_round_snapshot(session_id)
+                    if snap:
+                        payload["snapshot"] = snap
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-            # ── push status changes (every transition, not just terminal) ──
-            session = engine.get_session(session_id)
-            if session and session.status.value != last_status:
-                last_status = session.status.value
-                yield f"data: {json.dumps({'type': 'status', 'status': last_status}, ensure_ascii=False)}\n\n"
+                # ── push status changes (every transition, not just terminal) ──
+                session = engine.get_session(session_id)
+                if session and session.status.value != last_status:
+                    last_status = session.status.value
+                    yield f"data: {json.dumps({'type': 'status', 'status': last_status}, ensure_ascii=False)}\n\n"
 
-            # ── check terminal status ──
-            if session and session.status.value in _TERMINAL_STATUSES:
+                # ── check terminal status ──
+                if session and session.status.value in _TERMINAL_STATUSES:
+                    yield "data: [DONE]\n\n"
+                    engine.cleanup_events(session_id)
+                    return
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("[SSE] stream iteration failed")
                 yield "data: [DONE]\n\n"
-                engine.cleanup_events(session_id)
                 return
 
     return StreamingResponse(

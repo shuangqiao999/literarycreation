@@ -403,7 +403,7 @@ async def _generate_skeleton(client, style: str, prev_tail: str,
         kwargs = {}
         if target_words and target_words > 0:
             kwargs["max_tokens"] = int(target_words * 1.2)
-        resp = await client().chat(
+        resp = await client.chat(
             [Message(role="user", content=p)],
             system="你是小说结构师，输出精简叙事骨架。",
             temperature=0.5, **kwargs,

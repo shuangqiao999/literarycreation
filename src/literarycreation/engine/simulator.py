@@ -381,9 +381,9 @@ class SimulationEngine:
                     self._social_thermometer[k] = max(0.0, min(100.0,
                         self._social_thermometer.get(k, 50.0)
                         + v * float(dec.get("intensity", 0.5))))
-            # 无匹配动作：自然衰减
-            for k in ("rumor_intensity", "faction_polarity"):
-                self._social_thermometer[k] = max(0.0, self._social_thermometer.get(k, 50.0) - 1.0)
+        # 每回合一次自然衰减（不在决策循环内，避免每决策衰减一遍）
+        for k in ("rumor_intensity", "faction_polarity"):
+            self._social_thermometer[k] = max(0.0, self._social_thermometer.get(k, 50.0) - 1.0)
 
         for dec in decisions:
             for action, sub_intensity, _target in re_engine._iter_subactions(dec):
@@ -457,11 +457,13 @@ class SimulationEngine:
                 pending.append(agent)
         if pending:
             await self._reflect_batch(pending, round_number, client, deltas)
-        elif self.agents:
-            # 即使无角色需要反思，也重置所有角色的计数器（_reflect_needed 已递增）
-            for agent in self.agents:
-                eid = agent.entity_id
-                self._last_reflect_round[eid] = round_number
+        # 对被跳过和已处理的角色统一更新 round，重置计数器
+        reflected_ids = {a.entity_id for a in pending}
+        for agent in self.agents:
+            eid = agent.entity_id
+            if eid not in reflected_ids:
+                self._reflect_counters[eid] = 0
+            self._last_reflect_round[eid] = round_number
 
         # 情感投入追踪（供高潮回报校验）
         for dec in decisions:
@@ -587,7 +589,8 @@ class SimulationEngine:
                 self._log("simulation",
                            f"[人格演化] {agent.name} 新增准则: {rule} (R{round_number})")
         except Exception as e:
-            logger.debug("[Simulator] 批量反思失败: %s", e)
+            logger.warning("[Simulator] 批量反思失败: %s", e)
+            self._log("simulation", f"批量反思失败——角色行为准则未更新")
         # 无论成功与否，重置所有参与角色的计数器
         for agent in agents:
             eid = agent.entity_id
@@ -796,7 +799,9 @@ class SimulationEngine:
         return "； ".join(parts) if parts else ""
 
     async def _narrate_round(self, client: Any, round_number: int,
-                             decisions: list[dict], deltas: dict) -> str:
+                              decisions: list[dict], deltas: dict) -> str:
+        if self._cancel is not None and self._cancel.is_set():
+            return ""
         from literarycreation.core.llm_client import Message
         lines = []
         for dec in decisions:

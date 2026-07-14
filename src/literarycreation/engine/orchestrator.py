@@ -56,7 +56,7 @@ class DeductionOrchestrator:
         session_store: SessionStore,
         logger_fn: Callable[[str, str], None] | None = None,
         cancel_event: Any = None,
-        round_callback: Callable[[int, int], None] | None = None,
+        round_callback: Callable[..., None] | None = None,
         resume_start_round: int = 0,
         fsm_override_store: dict | None = None,
     ) -> None:
@@ -168,10 +168,13 @@ class DeductionOrchestrator:
                     "speech_style": getattr(a, "speech_style", ""),
                     "system_prompt_extra": getattr(a, "system_prompt_extra", ""),
                 }
-        # 追加情感投资数据
+        # 追加情感投资数据（隔离异常，防止一次崩溃丢掉全部快照）
         sim = getattr(self, "_simulation_engine", None)
         if sim and hasattr(sim, "_emotional_investment"):
-            snapshot["emotional_investment"] = sim._emotional_investment.to_dict()
+            try:
+                snapshot["emotional_investment"] = sim._emotional_investment.to_dict()
+            except Exception:
+                logger.warning("[Orchestrator] 情感投资序列化失败，跳过")
         data = self.store.get(session_id)
         cfg = (data or {}).get("config_json", {}) or {}
         if isinstance(cfg, str):
@@ -256,6 +259,7 @@ class DeductionOrchestrator:
 
         # 4. 从 Kuzu 图重建 Agent 列表
         self._log("orchestrator", "从图谱重建智能体...")
+        snapshot = self._load_state_snapshot(cfg)
         try:
             from .agent_factory import create_agents_from_graph
             agents = await create_agents_from_graph(
@@ -279,7 +283,6 @@ class DeductionOrchestrator:
             logger.warning("[Orchestrator] 智能体重建失败: %s", e)
 
         # 5. 恢复量化状态 (EntityState metrics / history / pending delays)
-        snapshot = self._load_state_snapshot(cfg)
         if snapshot and self._rule_engine is not None:
             states_raw = snapshot.get("states", {})
             restored: dict[str, Any] = {}
@@ -859,17 +862,19 @@ class DeductionOrchestrator:
                 traj_lines.append(f"角色「{nm}」将于本章完成弧光并有意义地退场（{ex}），不要让其无声消失")
         if traj_lines:
             story_ctx = "【角色轨迹】\n" + "\n".join(f"- {t}" for t in traj_lines) + "\n\n" + story_ctx
-        # 高潮推进（仅在本章无强制事件时注入）
+        # 短语避重
+        phrase_hint = build_phrase_hint(story_state)
+        if phrase_hint:
+            story_ctx = phrase_hint + "\n\n" + story_ctx
+        # 高潮与结局约束移到最后注入，确保在 prompt 中优先级最高
         if self._climax_driver is not None and not outline_event:
             climax_ctx = self._climax_driver.build_text(i, canon, story_state)
             if climax_ctx:
                 story_ctx = climax_ctx + "\n\n" + story_ctx
-        # 结局章专属约束（最后3章）
         if i >= max(1, n - 2) and i > 1:
             ending_block = _build_ending_block(i, n)
             if ending_block:
                 story_ctx = ending_block + "\n\n" + story_ctx
-        # 短语避重
         phrase_hint = build_phrase_hint(story_state)
         if phrase_hint:
             story_ctx = phrase_hint + "\n\n" + story_ctx
@@ -1039,8 +1044,8 @@ class DeductionOrchestrator:
             canon.establish_from_chapter(text, i, self._states, alive_checker)
             canon.record_scene(text, i, story_state)
             canon.save_into(story_state)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[Orchestrator] 正典台账持久化失败: %s", e)
         try:
             from .prose_renderer import fingerprint_text
             fps = fingerprint_text(text)
@@ -1053,11 +1058,10 @@ class DeductionOrchestrator:
             existing = set(story_state.get("tracked_phrases", []))
             existing.update(new_phrases)
             story_state["tracked_phrases"] = list(existing)[:8]
-            # 跨章整句/箴言重复追踪
             from .prose_renderer import update_repeated_sentences
             update_repeated_sentences(story_state, text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[Orchestrator] 指纹/短语追踪失败: %s", e)
         try:
             data = self.store.get(self.session.id)
             cfg = (data or {}).get("config_json", {}) or {}
@@ -1065,8 +1069,8 @@ class DeductionOrchestrator:
                 cfg = _json.loads(cfg)
             cfg["story_state"] = story_state
             self.store.update(self.session.id, config_json=_json.dumps(cfg, ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[Orchestrator] story_state持久化失败: %s", e)
 
     async def _render_prose(self, report_payload: dict[str, Any]) -> None:
         """文学模式 Phase 5：逐章生成正文并落盘，计算提纲对齐。"""
@@ -1254,10 +1258,12 @@ class DeductionOrchestrator:
                     full_parts.append(f"第{i}章\n\n（正文生成失败，详细摘要见文件 {fname}）")
                 self._log("report", f"第{i}/{n}章已生成并保存（{len(text)} 字）→ {fname}")
 
-        # 修订流水线：对读者反馈不佳的章节做编辑增强
+        # 修订流水线：对读者反馈不佳的章节做编辑增强（跳过回退章）
         from .revision_pipeline import RevisionPipeline
         rev_pipe = RevisionPipeline(self._narrator.build_voice_block())
         for idx, ch_text in enumerate(full_parts, 1):
+            if "正文生成失败" in ch_text[:50]:
+                continue  # 跳过回退章
             rfb = reader_feedback_list[idx - 1] if idx <= len(reader_feedback_list) else None
             cw_data = story_state.get("chapter_weights", [])
             cw = cw_data[idx - 1] if idx <= len(cw_data) else 0.0

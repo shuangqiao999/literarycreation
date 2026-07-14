@@ -53,9 +53,10 @@ def simplify_prompt(prompt: str, tier: str) -> str:
 
 
 def reduce_max_tokens(base: int, tier: str) -> int:
-    """小模型需降低 max_tokens 防 400 错误。"""
+    """小模型需降低 max_tokens 防 400 错误，所有模型上限 16384。"""
+    result = base
     if tier == "tiny":
-        return min(base, 1024)
-    if tier == "small":
-        return min(base, 4096)
-    return base
+        result = min(base, 1024)
+    elif tier == "small":
+        result = min(base, 4096)
+    return min(result, 16384) if result > 0 else 0
