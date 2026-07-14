@@ -92,7 +92,7 @@ const PHASE_LABELS: Record<string, string> = {
   failed: "失败",
   paused: "已暂停",
 };
-const RUNNING_SET = new Set(["ontology_running","graph_running","agents_running","simulating","reporting","optimizing"]);
+const RUNNING_SET = new Set(["ontology_running","blueprint_running","graph_running","agents_running","simulating","reporting"]);
 
 const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
   <label style={{ display: "inline-flex", alignItems: "center", flexShrink: 0, cursor: "pointer" }}>
@@ -132,7 +132,6 @@ export default function App() {
 
   // ── 文学创作（Mode 1 续写 / Mode 2 提纲复现）──
   const [inputMode, setInputMode] = useState<"seed" | "outline">("seed");
-  const [style, setStyle] = useState("");
   const [chapters, setChapters] = useState(10);
   const [targetWords, setTargetWords] = useState(100000);
   const LIT_METRICS = ["trust", "tension", "affection", "power", "mystery", "fatigue"] as const;
@@ -174,7 +173,7 @@ export default function App() {
   const [cfgLLMKey, setCfgLLMKey] = useState("");
   const [cfgLLMModel, setCfgLLMModel] = useState("");
   const [cfgLLMProvider, setCfgLLMProvider] = useState("");
-  const [cfgLLMTemp, setCfgLLMTemp] = useState(0.3);
+  const [cfgLLMTemp, setCfgLLMTemp] = useState(0.85);
   const [cfgEmbedBase, setCfgEmbedBase] = useState("");
   const [cfgEmbedKey, setCfgEmbedKey] = useState("");
   const [cfgEmbedModel, setCfgEmbedModel] = useState("");
@@ -404,7 +403,7 @@ export default function App() {
     }
     setCreating(true);
     try {
-      const config: any = { domain, target_words: targetWords };
+      const config: any = { domain, target_words: targetWords, total_rounds: chapters };
       if (inputMode === "outline") {
         const toNum = (o: Record<string, string>) => {
           const r: Record<string, number> = {};
@@ -421,7 +420,7 @@ export default function App() {
       const r = await fetch(`${API_BASE}/session`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, source_material: sourceMaterial, total_rounds: chapters, config }),
+        body: JSON.stringify({ title, source_material: sourceMaterial, config }),
       });
       if (r.ok) {
         const data = await r.json();
@@ -563,8 +562,7 @@ export default function App() {
     if (!selectedId) return;
     const selected = sessions.find(s => s.id === selectedId);
     if (!selected) return;
-    const runningSet = new Set(["ontology_running","graph_running","agents_running","simulating","reporting","optimizing"]);
-    if (!runningSet.has(selected.status)) { sseSidRef.current = null; return; }
+    if (!RUNNING_SET.has(selected.status)) { sseSidRef.current = null; return; }
     if (sseSidRef.current === selectedId) return; // already connected
     sseSidRef.current = selectedId;
     const es = new EventSource(`${API_BASE}/session/${selectedId}/stream`);
@@ -1610,7 +1608,9 @@ export default function App() {
 
                 <label style={lbl}>模型名称</label>
                 <input style={inp} value={cfgLLMModel} onChange={e => setCfgLLMModel(e.target.value)} placeholder="qwen/qwen3.5-9b" />
-                <div style={{ marginTop: 4, marginBottom: 12 }}>
+                <label style={lbl}>温度 (0.01-2.00) <span style={{ color: "#64748b", fontSize: 12 }}>{cfgLLMTemp.toFixed(2)}</span></label>
+                <input type="range" min="1" max="200" value={Math.round(cfgLLMTemp * 100)} onChange={e => setCfgLLMTemp(Number(e.target.value) / 100)} style={{ width: "100%", accentColor: "#3b82f6" }} />
+                <div style={{ marginTop: 4, marginBottom: 12, display: "flex", gap: 8 }}>
                   <button onClick={fetchModels} disabled={cfgFetchingModels} style={{ ...btn, background: "#334155", color: "#e2e8f0" }}>{cfgFetchingModels ? "获取中..." : "拉取模型列表"}</button>
                 </div>
               </>
