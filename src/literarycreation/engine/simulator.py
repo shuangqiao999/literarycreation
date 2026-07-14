@@ -218,6 +218,9 @@ class SimulationEngine:
             if dec:
                 dec["actor_id"] = agent.entity_id
                 dec["driver"] = "blueline"
+                # 合理性检查：拦截明显不合理动作
+                if st is not None:
+                    dec = self._sanity_check_action(agent, dec, st)
             else:
                 dec = {"actor_id": agent.entity_id, "action_type": "observe", "intensity": 0.3,
                        "target": "", "rationale": "[蓝图模式] 默认观察", "driver": "blueline"}
@@ -296,6 +299,8 @@ class SimulationEngine:
             if dec:
                 dec["actor_id"] = agent.entity_id
                 dec["driver"] = "freeform"
+                if st is not None:
+                    dec = self._sanity_check_action(agent, dec, st)
             else:
                 dec = {"actor_id": agent.entity_id, "action_type": "observe", "intensity": 0.3,
                        "target": "", "rationale": "默认观察", "driver": "freeform"}
@@ -610,6 +615,49 @@ class SimulationEngine:
                     }
                 except Exception:
                     pass
+
+    # ── 动作合理性检查 ──
+
+    def _sanity_check_action(self, agent: Any, dec: dict, state: Any) -> dict:
+        """拦截明显不合理的动作并降级为 observe。纯规则，零 LLM。"""
+        m = state.metrics if hasattr(state, "metrics") else {}
+        at = str(dec.get("action_type", "") or "")
+        fatigue = float(m.get("fatigue", 50))
+        power = float(m.get("power", 50))
+        trust = float(m.get("trust", 50))
+        tension = float(m.get("tension", 30))
+
+        # 疲劳上限：累到极限不会主动发起冲突
+        if fatigue > 85 and at in ("confront", "betray"):
+            return self._downgrade(dec, agent,
+                                   f"{agent.name}疲劳过度({fatigue:.0f})，将{at}降级为观察")
+        # 疲劳+无权力：全面降级高强度动作
+        if fatigue > 75 and power < 15 and at in ("confront", "betray", "manipulate"):
+            return self._downgrade(dec, agent,
+                                   f"{agent.name}既疲惫又无力({fatigue:.0f}/{power:.0f})，"
+                                   f"将{at}降级为观察")
+        # 零信任不表白
+        if trust < 15 and at == "confess":
+            return self._downgrade(dec, agent,
+                                   f"{agent.name}信任极低({trust:.0f})，将confess降级为观察")
+        # 疲劳连续高且动作仍为高强度：强制喘口气
+        if fatigue > 80 and tension > 70 and at in ("confront", "protect"):
+            return self._downgrade(dec, agent,
+                                   f"{agent.name}高疲劳高紧张({fatigue:.0f}/{tension:.0f})，"
+                                   f"将{at}降级为观察以喘息")
+        return dec
+
+    def _downgrade(self, dec: dict, agent: Any, reason: str) -> dict:
+        """降级动作为 observe，保留原决策信息供叙事记忆参考。"""
+        old_action = dec.get("action_type", "?")
+        old_rationale = dec.get("rationale", "")
+        dec["action_type"] = "observe"
+        dec["intensity"] = 0.3
+        dec["target"] = ""
+        dec["rationale"] = f"[合理性拦截] 原本想{old_action}({old_rationale[:30]})，但{reason}"
+        dec["driver"] = dec.get("driver", "freeform")
+        self._log("simulation", f"[合理性拦截] {reason}")
+        return dec
 
     # ── Helpers ──
 
