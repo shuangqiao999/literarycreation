@@ -230,19 +230,18 @@ class SimulationEngine:
             return dec
 
         ranges = re_engine.ranges()
-        decisions = []
+        # 并行决策：所有角色基于同一组章首状态独立行动
+        tasks = [_decide(agent) for agent in alive_agents]
+        results = await asyncio.gather(*tasks)
+        decisions = [r for r in results if r is not None]
         self_seen: dict[str, dict[str, float]] = {}
-        for j, agent in enumerate(alive_agents):
-            dec = await _decide(agent)
+        for agent, dec in zip(alive_agents, results):
             if dec is None:
                 continue
-            decisions.append(dec)
-            # 事件流：非最后一个角色，立即结算其自身效应，令下一个角色基于变化后的世界决策
-            if j < len(alive_agents) - 1 and agent.entity_id in self._states:
+            if agent.entity_id in self._states:
                 sd = re_engine.compute_self_deltas(dec, state=self._states.get(agent.entity_id), env=self._env)
                 if sd:
                     self_seen[agent.entity_id] = sd
-                    self._states[agent.entity_id].apply_deltas(sd, round_number, ranges)
 
         return await self._finalize_round(round_number, decisions, client, sim_round, self_seen)
 
@@ -310,19 +309,17 @@ class SimulationEngine:
             return dec
 
         ranges = re_engine.ranges()
-        decisions = []
+        tasks = [_decide(agent) for agent in alive_agents]
+        results = await asyncio.gather(*tasks)
+        decisions = [r for r in results if r is not None]
         self_seen: dict[str, dict[str, float]] = {}
-        for j, agent in enumerate(alive_agents):
-            dec = await _decide(agent)
+        for agent, dec in zip(alive_agents, results):
             if dec is None:
                 continue
-            decisions.append(dec)
-            # 事件流：非最后一个角色，立即结算其自身效应，令下一个角色基于变化后的世界决策
-            if j < len(alive_agents) - 1 and agent.entity_id in self._states:
+            if agent.entity_id in self._states:
                 sd = re_engine.compute_self_deltas(dec, state=self._states.get(agent.entity_id), env=self._env)
                 if sd:
                     self_seen[agent.entity_id] = sd
-                    self._states[agent.entity_id].apply_deltas(sd, round_number, ranges)
 
         return await self._finalize_round(round_number, decisions, client, sim_round, self_seen)
 
@@ -346,7 +343,12 @@ class SimulationEngine:
             if delay_d:
                 st.apply_deltas(delay_d, round_number, ranges)
 
-        # 自身效应已在事件流循环即时结算；此处仅结算跨角色"目标"效应
+        # 自身效应（并行模式：不再在决策循环中即时结算，统一在此处应用）
+        for eid, d in self_deltas.items():
+            if eid in self._states:
+                self._states[eid].apply_deltas(d, round_number, ranges)
+
+        # 此处仅结算跨角色"目标"效应
         target_deltas = re_engine.resolve_targets(
             self._states, decisions, self._name_to_id, self._env)
 
