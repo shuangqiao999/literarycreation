@@ -434,6 +434,9 @@ class DeductionPreprocessor:
         from literarycreation.core.chunker import TextChunker
         from literarycreation.core.tokenizer import extract_named_entities
 
+        # 清理上次运行的旧表，确保每次重跑从干净状态开始
+        self.drop_tables()
+
         # 1. semantic chunking
         chunker = TextChunker(strategy="paragraph", max_chunk_size=1536)
         chunks = chunker.chunk(source, file_type=".txt")

@@ -1077,6 +1077,7 @@ class DeductionOrchestrator:
 
         from .canon import CanonLedger
         from .prose_renderer import ProseRenderer
+        from literarycreation.core.llm_client import DeductionLLMClient
 
         rounds = list(getattr(self, "_simulation_rounds", []))
         outline = getattr(self, "_outline", None)
