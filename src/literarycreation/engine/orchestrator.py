@@ -913,10 +913,12 @@ class DeductionOrchestrator:
         prev_tail: str,
         per_ch: int,
         canon: Any,
-        enforcer: Any,
         story_state: dict[str, Any],
     ) -> str:
-        """渲染一章 → 正典校验重写 → 场景去重重写 → 字数扩写。返回最终 text。"""
+        """渲染一章 → 正典校验重写 → 场景去重重写。返回最终 text。
+
+        字数为软目标（仅通过 prompt 参考量级引导），不做硬性扩写——
+        质量与逻辑优先，篇幅由情节需要决定。"""
         text = await renderer.render_chapter(
             chapter_idx=i, total_chapters=n,
             seed_text=self.session.source_material,
@@ -1002,29 +1004,6 @@ class DeductionOrchestrator:
                 logger.warning("[Orchestrator] 第%d章场景重复: %s", i, scene_conflicts)
                 self._quality_warnings.append(
                     f"第{i}章：场景与前章雷同未消除")
-
-        # 字数硬约束
-        is_fallback = "正文生成失败" in text[:50]
-        if not is_fallback and per_ch > 0:
-            passed, _msg = enforcer.check(text, per_ch)
-            if not passed:
-                from literarycreation.core.llm_client import DeductionLLMClient, Message
-                from ._utils import extract_text as _extract_text
-                _exp_client = DeductionLLMClient()
-
-                async def _expand(prompt: str, _c=_exp_client, _pc=per_ch) -> str:
-                    resp = await _c.chat(
-                        [Message(role="user", content=prompt)],
-                        system="你是文学作家，在完整保留原情节、人物、对话与顺序的前提下扩写加长本章正文。只输出正文。",
-                        temperature=0.8, max_tokens=int(_pc * 2.4) if _pc else 0)
-                    return _extract_text(resp).strip()
-
-                text = await enforcer.enforce(text, per_ch, _expand, max_retries=2, log_fn=self._log)
-                post = canon.validate(text, current_round=i)
-                if post:
-                    logger.warning("[Orchestrator] 第%d章扩写后仍存正典风险: %s", i, post)
-                if post:
-                    ccu = list(post)
 
         self._last_canon_conflicts = ccu
         return text
@@ -1180,9 +1159,7 @@ class DeductionOrchestrator:
             canon = CanonLedger.from_state(story_state, blueprint=outline)
             alive_checker = (lambda st: self._rule_engine.is_alive(st)) if self._rule_engine else None
             from .climax_driver import ClimaxDriver
-            from .word_count_enforcer import WordCountEnforcer
             self._climax_driver = ClimaxDriver(n)
-            enforcer = WordCountEnforcer(min_ratio=0.75)
             for i, rnd in enumerate(rounds, 1):
                 self._check_cancel()
                 self._log("report", f"正在渲染第{i}/{n}章...")
@@ -1191,7 +1168,7 @@ class DeductionOrchestrator:
                     story_state=story_state, canon=canon, ev_by_round=ev_by_round)
                 text = await self._render_and_validate_chapter(
                     renderer=renderer, i=i, n=n, ci=ci, story_ctx=ci["story_ctx"],
-                    prev_tail=prev_tail, per_ch=per_ch, canon=canon, enforcer=enforcer,
+                    prev_tail=prev_tail, per_ch=per_ch, canon=canon,
                     story_state=story_state)
 
                 # 对话风格事后检测

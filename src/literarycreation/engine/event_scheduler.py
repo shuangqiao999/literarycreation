@@ -143,14 +143,16 @@ class EventScheduler:
     # ── per-round dispatch ──
 
     def get_events_for_round(self, round_number: int) -> list[ScheduledEvent]:
-        """Collect events scheduled for this round (including catch-up).
+        """Collect events scheduled for this round.
 
-        Soft/optional events that have been retried too many times are dropped.
+        每个事件只在其预定轮次派发一次；仅当事件被标记推迟（retries>0）时，
+        才在其后 catch_up_window 轮内补发。禁止提前派发——
+        否则同一事件会驱动相邻两章，造成跨章情节重复。
         """
         results: list[ScheduledEvent] = []
         for event in self._key_events:
-            window_start = max(1, event.round - event.catch_up_window)
-            if window_start <= round_number <= event.round:
+            window_end = event.round + (event.catch_up_window if event.retries > 0 else 0)
+            if event.round <= round_number <= window_end:
                 if event.level == "optional" and event.retries >= event.max_retries:
                     continue
                 results.append(event)

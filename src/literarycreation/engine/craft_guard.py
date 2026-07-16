@@ -38,7 +38,7 @@ class SceneAllocator:
         ratio = total_words / sum(alloc)
         alloc = [int(a * ratio) for a in alloc]
 
-        parts = ["【场景权重 — 请按以下字数分配组织本章结构】"]
+        parts = ["【场景权重 — 按以下权重分配笔墨（字数仅为参考比例，非硬性要求；以情节紧凑为先）】"]
         for j, (ev, w) in enumerate(zip(events, alloc), 1):
             snippet = ev[:50].replace("\n", " ")
             label = "核心转折" if scores[j - 1] >= 3 else ("推进" if scores[j - 1] >= 2 else "过渡")
