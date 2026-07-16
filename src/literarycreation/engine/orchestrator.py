@@ -422,13 +422,19 @@ class DeductionOrchestrator:
     async def _phase2_graph(self) -> None:
         _current_phase.set("graph")
         self._check_cancel()
-        # 嵌入模型快速校验
-        from literarycreation.core.providers import ProviderRegistry
-        from .health_validator import validate_embedding_model
-        registry = ProviderRegistry()  # None → 自动解析数据目录
-        emb = registry.resolve_for_embedding()
-        if emb.get("api_base") and emb.get("model_name"):
-            validate_embedding_model(emb["api_base"], emb["model_name"], log_fn=self._log)
+        # 嵌入模型预检：无有效嵌入配置则跳过图谱阶段（文学创作降级可用）
+        from literarycreation.core.providers import registry as _prov_registry
+        emb = _prov_registry.resolve_for_embedding()
+        embed_ok = bool(emb.get("api_base") and emb.get("model_name"))
+        if not embed_ok:
+            self._log("graph",
+                      "⚠ 嵌入模型未配置（api_base/model_name 为空），跳过知识图谱构建。请在设置→嵌入模型中配置。")
+            logger.warning("[Orchestrator] 嵌入模型未配置，图谱阶段跳过")
+            self.store.update(self.session.id, entity_count=0, relation_count=0,
+                              status=SessionStatus.AGENTS_RUNNING.value,
+                              phase=DeductionPhase.AGENTS.value)
+            return
+
         self._log("graph", "阶段2: GraphRAG 知识图谱构建开始")
 
         # 预处理: 语义分块 + 实体提取 + LanceDB 索引
