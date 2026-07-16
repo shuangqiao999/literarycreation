@@ -394,6 +394,8 @@ class DeductionPreprocessor:
         must_contain: set[str] | None = None,
     ) -> list[str]:
         if self._table is None or self._dim <= 0:
+            logger.warning("[Preprocessor] LanceDB table unavailable (dim=%s, table=%s) — entity '%s' retrieval skipped",
+                           self._dim, "yes" if self._table is not None else "no", entity_name)
             return []
         cache_key = (entity_name, top_k, frozenset(must_contain) if must_contain else None)
         with self._cache_lock:
@@ -403,12 +405,16 @@ class DeductionPreprocessor:
                 return list(cached)
         try:
             query_vec = self._sync_embed_single(entity_name)
-        except Exception:
+        except Exception as e:
+            logger.warning("[Preprocessor] embed failed for '%s': %s", entity_name, e)
             return []
         try:
             raw = self._hybrid_or_vector_search(self._table, query_vec, entity_name, top_k * 3)
-        except Exception:
+        except Exception as e:
+            logger.warning("[Preprocessor] vector search failed for '%s': %s", entity_name, e)
             return []
+        # must_contain 过滤前先看原始命中数，诊断是否过滤太狠
+        raw_before = len(raw)
         results: list[str] = []
         for r in raw:
             content = r.get("content", "")
@@ -420,6 +426,11 @@ class DeductionPreprocessor:
                 results.append(content)
             if len(results) >= top_k:
                 break
+        if raw_before > 0 and not results:
+            logger.info("[Preprocessor] entity '%s': %d raw hits, all filtered by must_contain=%s",
+                        entity_name, raw_before, must_contain)
+        elif raw_before == 0:
+            logger.info("[Preprocessor] entity '%s': 0 raw vector hits in LanceDB", entity_name)
         with self._cache_lock:
             self._recall_cache[cache_key] = list(results)
         return results
