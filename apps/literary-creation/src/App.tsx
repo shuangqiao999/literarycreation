@@ -67,7 +67,6 @@ interface ReportData {
   key_events_plan?: Array<{ round: number; event: string }>;
   chapters?: Array<{ index: number; title: string; file: string; words: number; canon_conflicts?: string[] }>;
   work_dir?: string;
-  target_words?: number;
 }
 
 interface TokenStats {
@@ -133,7 +132,6 @@ export default function App() {
   // ── 文学创作（Mode 1 续写 / Mode 2 提纲复现）──
   const [inputMode, setInputMode] = useState<"seed" | "outline">("seed");
   const [chapters, setChapters] = useState(10);
-  const [targetWords, setTargetWords] = useState(100000);
   const LIT_METRICS = ["trust", "tension", "affection", "power", "mystery", "fatigue"] as const;
   const LIT_METRIC_CN: Record<string, string> = { trust: "信任", tension: "张力", affection: "情感", power: "权力", mystery: "悬念", fatigue: "疲惫" };
   type OutlineChar = { name: string; arc: string; initial: Record<string, string>; final: Record<string, string> };
@@ -403,7 +401,7 @@ export default function App() {
     }
     setCreating(true);
     try {
-      const config: any = { domain, target_words: targetWords, total_rounds: chapters };
+      const config: any = { domain, total_rounds: chapters };
       if (inputMode === "outline") {
         const toNum = (o: Record<string, string>) => {
           const r: Record<string, number> = {};
@@ -429,7 +427,7 @@ export default function App() {
       }
     } catch { /* ignore */ }
     setCreating(false);
-  }, [title, sourceMaterial, inputMode, chapters, targetWords, characters, keyEvents, domain]);
+  }, [title, sourceMaterial, inputMode, chapters, characters, keyEvents, domain]);
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -689,14 +687,7 @@ export default function App() {
             <input type="number" min={1} max={200} value={chapters}
               onChange={e => setChapters(Math.max(1, Number(e.target.value) || 1))}
               style={{ width: 70, height: 28, fontSize: 13 }} />
-            <span style={{ fontSize: 11, color: "#64748b" }}>= 推演轮数</span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-            <label style={{ fontSize: 12, color: "#94a3b8" }}>预估总字数</label>
-            <input type="number" min={0} max={5000000} step={1000} value={targetWords}
-              onChange={e => setTargetWords(Math.max(0, Number(e.target.value) || 0))}
-              style={{ width: 90, height: 28, fontSize: 13 }} />
-            <span style={{ fontSize: 11, color: "#64748b" }}>≈ {chapters > 0 ? Math.round(targetWords / chapters) : 0} 字/章（0=不限）</span>
+            <span style={{ fontSize: 11, color: "#64748b" }}>= 推演轮数；篇幅由情节自由决定</span>
           </div>
           {inputMode === "outline" && (
             <div style={{ marginBottom: 6, background: "#0f172a", borderRadius: 6, padding: 8 }}>
