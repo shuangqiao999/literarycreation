@@ -1,6 +1,8 @@
 """Prompt 自适应 — 根据模型参数量级简化 prompt，防止小模型 400 错误。"""
 from __future__ import annotations
 
+import re as _re
+
 _MODEL_TIERS: dict[str, str] = {}
 # 自动注册已知模型
 for sz, tier in [("1b","tiny"),("2b","tiny"),("3b","tiny"),
@@ -19,44 +21,36 @@ def detect_tier(model_name: str) -> str:
     return "medium"  # 未知模型保守假设中档
 
 
+_BULLET_RE = _re.compile(r"^(?:[-*]|\d+\.)\s")
+
+
 def simplify_prompt(prompt: str, tier: str) -> str:
-    """根据模型档位压缩 prompt。"""
-    if tier == "large":
+    """根据模型档位压缩 prompt。
+
+    仅对 tiny 档做保守压缩（限制要点行数量），绝不删除输出格式、
+    JSON schema、围栏代码块或「## 文本」等任务关键内容——
+    误删待处理文本会导致模型收到空任务而返回空结果。
+    """
+    if tier != "tiny":
         return prompt
-    if tier == "medium":
-        return prompt
-    # small/tiny: 去掉大段示例，压缩规则为精简指令
-    lines = prompt.split("\n")
-    result: list[str] = []
-    in_example = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("示例") or stripped.startswith("例") or stripped.startswith("如") or "```" in stripped:
-            in_example = not in_example
-            continue
-        if in_example:
-            continue
-        result.append(line)
-    simplified = "\n".join(result)
-    if tier == "tiny":
-        # 进一步压缩：每段不超过3个要点
-        final: list[str] = []
-        count = 0
-        for line in simplified.split("\n"):
-            if line.strip().startswith("-") or line.strip().startswith("*") or line.strip().startswith("1."):
-                count += 1
-                if count > 15:
-                    continue
-            final.append(line)
-        simplified = "\n".join(final)
-    return simplified
+    final: list[str] = []
+    count = 0
+    for line in prompt.split("\n"):
+        if _BULLET_RE.match(line.strip()):
+            count += 1
+            if count > 15:
+                continue
+        final.append(line)
+    return "\n".join(final)
 
 
 def reduce_max_tokens(base: int, tier: str) -> int:
-    """小模型需降低 max_tokens 防 400 错误，所有模型上限 16384。"""
+    """按档位限制 max_tokens，所有模型上限 16384。
+
+    下限不能低于 8192：蓝图/图谱抽取的 JSON 输出可能较长，
+    过低的上限会截断 JSON 导致解析失败。
+    """
     result = base
-    if tier == "tiny":
-        result = min(base, 1024)
-    elif tier == "small":
-        result = min(base, 4096)
+    if tier in ("tiny", "small"):
+        result = min(base, 8192)
     return min(result, 16384) if result > 0 else 0
